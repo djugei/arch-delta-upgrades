@@ -1,5 +1,5 @@
 [workspace]
-members = [ "client", "server"]
+members = [ "client", "server", "parsing"]
 resolver = "2"
 
 

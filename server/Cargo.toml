@@ -16,6 +16,7 @@ pretty_env_logger = "*"
 ddelta = "*"
 zstd = "*"
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+parsing = {path = "../parsing"}
 
 [dev-dependencies]
 tempfile = "*"

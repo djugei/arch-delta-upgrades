@@ -8,6 +8,15 @@ pub struct Package {
     trailer: Str,
 }
 
+impl Package {
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn get_version(&self) -> &str {
+        &self.version
+    }
+}
+
 impl<'s> TryFrom<&'s str> for Package {
     type Error = ();
 

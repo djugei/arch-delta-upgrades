@@ -6,10 +6,14 @@ use axum::{
     Router,
 };
 use log::debug;
-use std::{hash::Hash, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::fs::File;
 
-use deltaserver::FileCache;
+use cache::FileCache;
+
+use parsing::{Delta, Package};
+
+mod cache;
 
 const MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
 const LOCAL: &str = "./deltaserver/";
@@ -169,156 +173,3 @@ async fn root() -> (StatusCode, &'static str) {
 async fn fallback() -> (StatusCode, &'static str) {
     (StatusCode::NOT_FOUND, "Page could not be found")
 }
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-struct Package {
-    name: Str,
-    version: Str,
-    arch: Str,
-    trailer: Str,
-}
-
-impl<'s> TryFrom<&'s str> for Package {
-    type Error = ();
-
-    fn try_from(value: &'s str) -> Result<Self, Self::Error> {
-        if value.contains('/') {
-            return Err(());
-        }
-        let (left, trailer) = value.rsplit_once('-').ok_or(())?;
-        let mut idx = left.rmatch_indices('-');
-        let _ = idx.next();
-        let (idx, _) = idx.next().ok_or(())?;
-        let (name, version) = left.split_at(idx);
-        let version = &version[1..];
-        let (arch, trailer) = trailer.split_once('.').ok_or(())?;
-
-        Ok(Package {
-            name: name.into(),
-            version: version.into(),
-            arch: arch.into(),
-            trailer: trailer.into(),
-        })
-    }
-}
-
-impl std::fmt::Display for Package {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}-{}-{}.{}",
-            self.name, self.version, self.arch, self.trailer
-        )
-    }
-}
-
-#[test]
-fn package_parse() {
-    let s = "6tunnel-0.13-1-x86_64.pkg.tar.xz";
-    let p = Package::try_from(s).unwrap();
-
-    assert_eq!(&*p.name, "6tunnel");
-    assert_eq!(&*p.version, "0.13-1");
-    assert_eq!(&*p.arch, "x86_64");
-    assert_eq!(&*p.trailer, "pkg.tar.xz");
-
-    assert_eq!(p.to_string(), s);
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-struct Delta {
-    name: Str,
-    old: Str,
-    new: Str,
-    arch: Str,
-    trailer: Str,
-}
-
-impl Delta {
-    fn get_old(self) -> Package {
-        Package {
-            name: self.name,
-            arch: self.arch,
-            trailer: self.trailer,
-            version: self.old,
-        }
-    }
-    fn get_new(self) -> Package {
-        Package {
-            name: self.name,
-            arch: self.arch,
-            trailer: self.trailer,
-            version: self.new,
-        }
-    }
-}
-
-impl TryFrom<(Package, Package)> for Delta {
-    type Error = ();
-
-    fn try_from((p1, p2): (Package, Package)) -> Result<Self, Self::Error> {
-        #[allow(clippy::if_same_then_else)]
-        if (&p1.name, &p1.arch, &p1.trailer) != (&p2.name, &p2.arch, &p2.trailer) {
-            Err(())
-        } else if p1.version >= p2.version {
-            Err(())
-        } else {
-            Ok(Delta {
-                name: p1.name,
-                arch: p1.arch,
-                trailer: p1.trailer,
-                old: p1.version,
-                new: p2.version,
-            })
-        }
-    }
-}
-
-impl std::fmt::Display for Delta {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}_to_{}-{}.{}",
-            self.name, self.old, self.new, self.arch, self.trailer
-        )
-    }
-}
-
-// should possibly take file descriptors instead of paths
-// or take (path, url) touples
-// to decouple http stuff from file management stuff
-// there should be a PkgManager struct to do the pkg management
-/*
-async fn gen_or_get(&self, fm: &FileManager, old: Package, new: Package) -> String {
-    assert_eq!(old.name, new.name);
-    let oldpath = format!("{}/pkg/{}", LOCAL, old);
-    let newpath = format!("{}/pkg/{}", LOCAL, old);
-    let patchpath = format!(
-        "{}/patch/{}:{}_to_{}",
-        LOCAL, old.name, old.version, new.version
-    );
-
-    // use max_par_dl semaphore
-    let oldfile = fm.dl_or_get(old);
-    let newfile = fm.dl_or_get(new);
-
-    let patchfile = if let Ok(f) = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(false)
-        .create(false)
-        .open(patchpath)
-        .await
-    {
-        todo!()
-    } else {
-        // generate patch
-        let permit = self.max_par_gen.acquire().await.unwrap();
-        let joinhandle = tokio::spawn(async move {
-            todo!("generate delta");
-        });
-        joinhandle.await.unwrap();
-        patchpath
-    }
-    todo!()
-}
-*/

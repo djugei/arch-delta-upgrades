@@ -8,9 +8,8 @@ use std::{
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
+use parsing::Package;
 use reqwest::Url;
-
-type Str = Box<str>;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -70,7 +69,7 @@ fn arch(server: Url, req: Url, tmpfile: PathBuf) -> Result<(), std::io::Error> {
             .filter(|e| e.0.ends_with(".zst"))
             .filter(|e| {
                 let p = Package::try_from(e.0.as_str()).unwrap();
-                p.name == package.name
+                p.get_name() == package.get_name()
             })
             .collect();
         local.sort();
@@ -130,38 +129,6 @@ fn arch(server: Url, req: Url, tmpfile: PathBuf) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-pub struct Package {
-    name: Str,
-    version: Str,
-    arch: Str,
-    trailer: Str,
-}
-
-impl<'s> TryFrom<&'s str> for Package {
-    type Error = ();
-
-    fn try_from(value: &'s str) -> Result<Self, Self::Error> {
-        if value.contains('/') {
-            return Err(());
-        }
-        let (left, trailer) = value.rsplit_once('-').ok_or(())?;
-        let mut idx = left.rmatch_indices('-');
-        let _ = idx.next();
-        let (idx, _) = idx.next().ok_or(())?;
-        let (name, version) = left.split_at(idx);
-        let version = &version[1..];
-        let (arch, trailer) = trailer.split_once('.').ok_or(())?;
-
-        Ok(Package {
-            name: name.into(),
-            version: version.into(),
-            arch: arch.into(),
-            trailer: trailer.into(),
-        })
-    }
-}
-
 fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error> {
     let orig = OpenOptions::new().read(true).open(orig).unwrap();
     let mut orig = zstd::Decoder::new(orig)?;
@@ -212,13 +179,4 @@ fn apply_patch(orig: &Path, patch: &Path, new: &Path) -> Result<(), std::io::Err
     pb.finish();
 
     Ok(())
-}
-impl std::fmt::Display for Package {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}-{}-{}.{}",
-            self.name, self.version, self.arch, self.trailer
-        )
-    }
 }
