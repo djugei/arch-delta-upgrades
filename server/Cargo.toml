@@ -1,0 +1,21 @@
+[package]
+name = "deltaserver"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum =  { version = "*", features = [] }
+hyper = { version = "*", features = ["client", "http1", "stream", "runtime"] }
+tokio = { version = "*", features = ["rt", "rt-multi-thread", "sync", "fs", "io-util", "macros"] }
+tokio-util = { version = "*", features = ["io"] }
+futures-util = "*"
+log = "*"
+pretty_env_logger = "*"
+ddelta = "*"
+zstd = "*"
+reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+
+[dev-dependencies]
+tempfile = "*"
