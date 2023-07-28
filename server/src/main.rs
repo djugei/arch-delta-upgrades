@@ -132,10 +132,12 @@ fn main() {
         let delta: Delta = (from, to).try_into().unwrap();
         let future = s.get_or_generate(delta.clone());
         let file = future.await.unwrap().unwrap();
-        let s = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::StreamBody::new(s);
+        let len = file.metadata().await.unwrap().len();
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let body = axum::body::StreamBody::new(stream);
         use hyper::header;
         let headers = [
+            (header::CONTENT_LENGTH, len.to_string()),
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
             (
                 header::CONTENT_DISPOSITION,
@@ -155,7 +157,7 @@ fn main() {
                 .route("/arch/:from/:to", get(delta))
                 .with_state(delta_cache);
 
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
             axum::Server::bind(&addr)
                 .serve(app.into_make_service())
                 .await

@@ -1,5 +1,5 @@
 [package]
-name = "deltaproxy"
+name = "deltaclient"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,10 +9,14 @@ edition = "2021"
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt"] }
 indicatif ="*"
-reqwest = { version = "*", default-features = false, features = ["rustls-tls", "blocking"]}
+reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 http = "*"
 clap = { version = "*", features = ["derive"] }
 itertools = "*"
 log = "*"
 pretty_env_logger = "*"
 parsing = {path = "../parsing"}
+tokio = "*"
+
+[[bin]]
+name = "deltaclient"

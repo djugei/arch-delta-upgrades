@@ -3,13 +3,14 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::FromStr,
 };
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
-use log::info;
+use log::{debug, info};
 use parsing::Package;
 use reqwest::Url;
+use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -24,10 +25,8 @@ enum Commands {
         patch: PathBuf,
         new: PathBuf,
     },
-    Arch {
+    Upgrade {
         server: Url,
-        req: Url,
-        tmpfile: PathBuf,
     },
 }
 
@@ -42,91 +41,132 @@ fn main() {
         Commands::Patch { orig, patch, new } => {
             apply_patch(&orig, &patch, &new).unwrap();
         }
-        Commands::Arch {
-            server,
-            req,
-            tmpfile,
-        } => arch(server, req, tmpfile).unwrap(),
+        Commands::Upgrade { server } => upgrade(server).unwrap(),
     }
 }
 
-fn arch(server: Url, req: Url, tmpfile: PathBuf) -> Result<(), std::io::Error> {
-    let template = "{msg} {wide_bar} {percent}% eta: {eta}";
-    let style = ProgressStyle::with_template(template).unwrap();
-    let message: String;
+fn upgrade(server: Url) -> std::io::Result<()> {
+    let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
+    use std::io::BufRead;
+    let lines: Vec<_> = upgrades
+        .lines()
+        .map(|l| l.unwrap())
+        .filter(|l| !l.starts_with("file"))
+        .inspect(|l| debug!("{}", l))
+        .collect();
 
-    // do regular requests to the regular mirrors
-    if req.path().ends_with(".db") | req.path().ends_with(".sig") {
-        message = format!("Downloading {}", req.path());
-    } else if req.path().ends_with(".tar.zst") {
-        let (_, filename) = req.path().rsplit_once('/').unwrap();
-        let package = Package::try_from(filename).unwrap();
+    debug!("downloading {} updates", lines.len());
 
-        let mut local: Vec<_> = std::fs::read_dir("/var/cache/pacman/pkg/")?
-            .map(|e| e.unwrap())
-            .filter(|e| e.file_type().unwrap().is_file())
-            .map(|e| (e.file_name().into_string().unwrap(), e.path()))
-            .filter(|e| e.0.ends_with(".zst"))
-            .filter(|e| {
-                let p = Package::try_from(e.0.as_str()).unwrap();
-                p.get_name() == package.get_name()
-            })
-            .collect();
-        local.sort();
-        if local.iter().any(|(name, _)| *name == *filename) {
-            info!("{} already downloaded", filename);
-            return Ok(());
-        }
-        let newest = local.pop();
-        if let Some((old, oldpath)) = newest {
-            info!("requesting {} to {}", old, filename);
-
-            let mut url: String = server.into();
-            url.push('/');
-            url.push_str(&old);
-            url.push('/');
-            url.push_str(filename);
-            let client = reqwest::blocking::ClientBuilder::new()
-                .timeout(None)
-                .build()
-                .unwrap();
-            let delta = client.get(url).send().unwrap();
-
-            let mut deltapath = tmpfile.clone();
-            deltapath.set_extension("delta");
-            let mut deltafile = std::fs::File::create(&deltapath)?;
-
-            let pb = ProgressBar::new(delta.content_length().unwrap_or(0));
-            pb.set_message(format!("Downloading {} to {}", old, filename));
-            pb.set_style(style.clone());
-            let mut pbdelta = pb.wrap_read(delta);
-            std::io::copy(&mut pbdelta, &mut deltafile)?;
-            pb.finish();
-            drop(deltafile);
-
-            apply_patch(&oldpath, &deltapath, &tmpfile).unwrap();
-            return Ok(());
-        } else {
-            message = format!("No cache: downloading {}", filename);
-        }
-    } else {
-        panic!("trying to download weird extension {:?}", req)
-    }
-
-    let client = reqwest::blocking::ClientBuilder::new()
-        .timeout(None)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
-        .unwrap();
-    let body = client.get(req.clone()).send().unwrap();
-    let mut file = std::fs::File::create(tmpfile)?;
+        .unwrap()
+        .block_on(async {
+            let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+            let client = reqwest::Client::new();
 
-    let pb = ProgressBar::new(body.content_length().unwrap_or(0));
-    pb.set_message(message);
-    pb.set_style(style.clone());
-    let mut pbbody = pb.wrap_read(body);
-    std::io::copy(&mut pbbody, &mut file)?;
-    pb.finish();
+            let mut set = JoinSet::new();
+            for line in lines {
+                let client = client.clone();
+                let maxpar = maxpar.clone();
+                let server = server.clone();
+                set.spawn(async move {
+                    debug!("spawned thread for {}", &line);
+                    let (_, filename) = line.rsplit_once('/').unwrap();
+                    if let Some((oldname, oldpath)) = newest_cached(filename).unwrap() {
+                        info!("delta-download {} to {}", oldname, filename);
+                        // delta download
+                        let mut file_name = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                        file_name.push(filename);
+                        let mut deltafile_name = file_name.clone();
+                        deltafile_name.as_mut_os_string().push(".delta");
+
+                        let mut deltafile = tokio::fs::File::create(deltafile_name.clone())
+                            .await
+                            .unwrap();
+
+                        let mut url: String = server.into();
+                        url.push('/');
+                        url.push_str(&oldname);
+                        url.push('/');
+                        url.push_str(filename);
+                        let guard = maxpar.acquire().await;
+                        let mut delta = client.get(url).send().await.unwrap();
+
+                        while let Some(chunk) = delta.chunk().await.unwrap() {
+                            deltafile.write_all(&chunk).await.unwrap()
+                        }
+                        drop(guard);
+                        tokio::task::spawn(async move {
+                            debug!(
+                                "applying {:?} to {:?} to get {:?}",
+                                &deltafile_name, &oldpath, &file_name
+                            );
+                            apply_patch(&oldpath, &deltafile_name, &file_name).unwrap()
+                        })
+                        .await
+                        .unwrap();
+                    } else {
+                        //conventional download
+                        info!("conventional-download {}", filename);
+                        let mut file = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                        file.push(filename);
+                        let mut file = tokio::fs::File::create(file).await.unwrap();
+
+                        // just one conventional download
+                        let guard = maxpar.acquire_many(3).await;
+                        let mut res = client.get(&line).send().await.unwrap();
+                        while let Some(chunk) = res.chunk().await.unwrap() {
+                            file.write_all(&chunk).await.unwrap()
+                        }
+                        drop(guard);
+                    }
+                    let mut sigfile = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                    sigfile.push(filename);
+                    sigfile.as_mut_os_string().push(".sig");
+                    let mut sigfile = tokio::fs::File::create(sigfile).await.unwrap();
+
+                    let guard = maxpar.acquire().await;
+                    let mut sigline = line.to_owned();
+                    sigline.push_str(".sig");
+                    info!("getting signature from {}", sigline);
+                    let mut res = client.get(&sigline).send().await.unwrap();
+                    while let Some(chunk) = res.chunk().await.unwrap() {
+                        sigfile.write_all(&chunk).await.unwrap()
+                    }
+                    drop(guard);
+                });
+            }
+
+            while let Some(res) = set.join_next().await {
+                // todo: error handling: don't panic in the parallel part, instead return errors
+                // and retry here
+                res.unwrap()
+            }
+        });
     Ok(())
+}
+
+/// returns the newest package in /var/cache/pacman/pkg that
+/// fits the passed package and is not identical to it in version
+fn newest_cached(filename: &str) -> std::io::Result<Option<(String, PathBuf)>> {
+    let package = Package::try_from(filename).unwrap();
+    let mut local: Vec<_> = std::fs::read_dir("/var/cache/pacman/pkg/")?
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_file())
+        .map(|e| (e.file_name().into_string().unwrap(), e.path()))
+        .filter(|e| e.0.ends_with(".zst"))
+        .filter(|e| {
+            let p = Package::try_from(e.0.as_str()).unwrap();
+            p.get_name() == package.get_name()
+        })
+        .collect();
+    local.sort();
+    if local.iter().any(|(name, _)| *name == *filename) {
+        info!("{} already downloaded", filename);
+        return Ok(None);
+    }
+    Ok(local.pop())
 }
 
 fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error> {
@@ -154,13 +194,7 @@ fn apply_patch(orig: &Path, patch: &Path, new: &Path) -> Result<(), std::io::Err
     let mut orig = Cursor::new(orig);
 
     let patch = OpenOptions::new().read(true).open(patch)?;
-    let patchlen = patch.metadata()?.len();
-    let pb = indicatif::ProgressBar::new(patchlen);
-    let template = "{msg} {wide_bar} {percent}% eta: {eta}";
-    let style = ProgressStyle::with_template(template).unwrap();
-    pb.set_style(style);
-    pb.set_message("Applying delta");
-    let patch = pb.wrap_read(patch);
+    //let patchlen = patch.metadata()?.len();
     let mut patch = zstd::Decoder::new(patch)?;
 
     // fixme: while the patches are perfect the compression is not bit identical
@@ -172,11 +206,16 @@ fn apply_patch(orig: &Path, patch: &Path, new: &Path) -> Result<(), std::io::Err
         .stdout(Stdio::piped())
         .spawn()?;
 
+    // gotta drain stdout into file while at the same time writing into stdin
+    // otherwise the internal buffer of stdin/out is full and it deadlocks
+    let mut new_f = OpenOptions::new().write(true).create(true).open(new)?;
+    let handle = std::thread::spawn(move || -> std::io::Result<()> {
+        std::io::copy(&mut z.stdout.unwrap(), &mut new_f)?;
+        Ok(())
+    });
     ddelta::apply_chunked(&mut orig, &mut z.stdin.unwrap(), &mut patch).unwrap();
 
-    let mut new_f = OpenOptions::new().write(true).create(true).open(new)?;
-    std::io::copy(&mut z.stdout.unwrap(), &mut new_f)?;
-    pb.finish();
+    handle.join().unwrap()?;
 
     Ok(())
 }

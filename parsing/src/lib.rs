@@ -93,14 +93,14 @@ impl Delta {
 }
 
 impl TryFrom<(Package, Package)> for Delta {
-    type Error = ();
+    type Error = &'static str;
 
     fn try_from((p1, p2): (Package, Package)) -> Result<Self, Self::Error> {
         #[allow(clippy::if_same_then_else)]
         if (&p1.name, &p1.arch, &p1.trailer) != (&p2.name, &p2.arch, &p2.trailer) {
-            Err(())
-        } else if p1.version >= p2.version {
-            Err(())
+            Err("unequal package")
+        } else if p1.version == p2.version {
+            Err("equal versions")
         } else {
             Ok(Delta {
                 name: p1.name,
