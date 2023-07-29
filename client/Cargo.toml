@@ -8,15 +8,16 @@ edition = "2021"
 [dependencies]
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt"] }
-indicatif ="*"
+indicatif = ">=0.17.0"
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 http = "*"
 clap = { version = "*", features = ["derive"] }
 itertools = "*"
 log = "*"
-pretty_env_logger = "*"
+env_logger = "*"
 parsing = {path = "../parsing"}
-tokio = "*"
+tokio = {version = "*", features = ["fs", "rt", "macros"]}
+pipe = "*"
 
 [[bin]]
 name = "deltaclient"
