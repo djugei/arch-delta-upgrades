@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 type Str = Box<str>;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
@@ -17,20 +19,35 @@ impl Package {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum PackageParseError {
+    #[error("{0:?}")]
+    Parse(&'static str),
+    #[error("invalid character in input")]
+    Invalid,
+}
+impl From<&'static str> for PackageParseError {
+    fn from(value: &'static str) -> Self {
+        Self::Parse(value)
+    }
+}
+
 impl<'s> TryFrom<&'s str> for Package {
-    type Error = ();
+    type Error = PackageParseError;
 
     fn try_from(value: &'s str) -> Result<Self, Self::Error> {
         if value.contains('/') {
-            return Err(());
+            return Err(PackageParseError::Invalid);
         }
-        let (left, trailer) = value.rsplit_once('-').ok_or(())?;
+        let (left, trailer) = value
+            .rsplit_once('-')
+            .ok_or("name, version | arch trailer")?;
         let mut idx = left.rmatch_indices('-');
         let _ = idx.next();
-        let (idx, _) = idx.next().ok_or(())?;
+        let (idx, _) = idx.next().ok_or("name | version")?;
         let (name, version) = left.split_at(idx);
         let version = &version[1..];
-        let (arch, trailer) = trailer.split_once('.').ok_or(())?;
+        let (arch, trailer) = trailer.split_once('.').ok_or("arch | trailer")?;
 
         Ok(Package {
             name: name.into(),
@@ -92,15 +109,22 @@ impl Delta {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum DeltaError {
+    #[error("unequal package")]
+    Package,
+    #[error("equal version")]
+    Version,
+}
 impl TryFrom<(Package, Package)> for Delta {
-    type Error = &'static str;
+    type Error = DeltaError;
 
     fn try_from((p1, p2): (Package, Package)) -> Result<Self, Self::Error> {
         #[allow(clippy::if_same_then_else)]
         if (&p1.name, &p1.arch, &p1.trailer) != (&p2.name, &p2.arch, &p2.trailer) {
-            Err("unequal package")
+            Err(DeltaError::Package)
         } else if p1.version == p2.version {
-            Err("equal versions")
+            Err(DeltaError::Version)
         } else {
             Ok(Delta {
                 name: p1.name,

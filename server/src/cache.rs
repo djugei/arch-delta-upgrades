@@ -45,6 +45,7 @@ where
      *    The future should not be blocking either by long calculations or io operations
      *    use async_runtime::spawn for calculations and async io for io
      *    f needs to take care of serializing the value to the file on its own
+     *    f must not panic
      * max_para: maximum number of expensive operations in flight at the same time
      */
     pub fn new(init_state: S, kf: KF, f: F, max_para: Option<usize>) -> Self {
@@ -65,76 +66,97 @@ where
         let mut oo = tokio::fs::OpenOptions::new();
         let create = oo.read(true).write(true).create(true);
 
-        let mut in_flight = self.in_flight.lock().await;
-        use std::collections::hash_map::Entry;
-        match (*in_flight).entry(key.clone()) {
-            Entry::Occupied(mut entry) => {
-                let mut e = entry.get_mut().clone();
-                drop(in_flight);
-                // threading errors are unrecoverable for now
-                let path = (self.kf)(&self.state, &key);
-                debug!("waiting {:?}", path);
-                e.changed().await.unwrap();
-                // weird but ok(ok()))
-                Ok(Ok(read.open(path).await?))
-            }
-            Entry::Vacant(entry) => {
-                let path = (self.kf)(&self.state, &key);
-                match read.open(&path).await {
-                    Ok(f) => {
-                        debug!("exists {:?}", path);
-                        Ok(Ok(f))
-                    }
-                    Err(e) => {
-                        if e.kind() != ErrorKind::NotFound {
-                            debug!("io error {:?}", path);
-                            Err(e)
-                        } else {
-                            debug!("generating {:?}", path);
-                            let (tx, rx) = tokio::sync::watch::channel(());
-                            entry.insert(rx);
-                            let w = create.open(&path).await?;
-                            drop(in_flight);
+        loop {
+            let mut in_flight = self.in_flight.lock().await;
+            use std::collections::hash_map::Entry;
+            match (*in_flight).entry(key.clone()) {
+                Entry::Occupied(mut entry) => {
+                    let mut e = entry.get_mut().clone();
+                    drop(in_flight);
+                    let path = (self.kf)(&self.state, &key);
+                    debug!("waiting {:?}", path);
+                    match e.changed().await {
+                        Ok(()) => {
+                            // weird but ok(ok()))
+                            return Ok(Ok(read.open(path).await?));
+                        }
+                        Err(_) => {
+                            // sender has been dropped which means either the generation function
+                            // paniced internally or the whole future has been dropped in flight.
+                            // we need to remove the entry and file and try again.
 
-                            let perm = if let Some(sem) = &self.max_para {
-                                debug!("sem get {:?}", path);
-                                let s = Some(sem.acquire().await);
-                                debug!("sem gotten {:?}", path);
-                                s
-                            } else {
-                                None
+                            if let Err(e) = tokio::fs::remove_file(path).await {
+                                // not found is fine thats what we want
+                                if e.kind() != ErrorKind::NotFound {
+                                    return Err(e);
+                                }
                             };
-                            // do the expensive operation
+                            continue;
+                        }
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let path = (self.kf)(&self.state, &key);
+                    match read.open(&path).await {
+                        Ok(f) => {
+                            debug!("exists {:?}", path);
+                            return Ok(Ok(f));
+                        }
+                        Err(e) => {
+                            if e.kind() != ErrorKind::NotFound {
+                                debug!("io error {:?}", path);
+                                return Err(e);
+                            } else {
+                                debug!("generating {:?}", path);
+                                let (tx, rx) = tokio::sync::watch::channel(());
+                                entry.insert(rx);
+                                let w = create.open(&path).await?;
+                                drop(in_flight);
 
-                            let f = (self.f)(self.state.clone(), key.clone(), w);
-                            let f = Box::pin(f);
-                            let mut f = f.await;
-                            match &mut f {
-                                Ok(ref mut f) => {
-                                    f.rewind().await?;
-                                }
-                                Err(_) => {
-                                    panic!("add error handling")
-                                }
+                                let perm = if let Some(sem) = &self.max_para {
+                                    debug!("sem get {:?}", path);
+                                    let s = Some(sem.acquire().await);
+                                    debug!("sem gotten {:?}", path);
+                                    s
+                                } else {
+                                    None
+                                };
+                                // do the expensive operation
+
+                                let f = (self.f)(self.state.clone(), key.clone(), w);
+                                let f = Box::pin(f);
+                                let f = f.await;
+                                let f = match f {
+                                    Ok(mut f) => {
+                                        f.rewind().await?;
+                                        f
+                                    }
+                                    Err(e) => {
+                                        debug!("generating failed, removing {}", path.display());
+                                        tokio::fs::remove_file(path).await?;
+                                        return Ok(Err(e));
+                                    }
+                                };
+
+                                drop(perm);
+
+                                // this can not panic as we hold a reciever ourselves
+                                tx.send(()).expect("threading failure (snd)");
+                                self.in_flight.lock().await.remove(&key);
+                                return Ok(Ok(f));
                             }
-
-                            drop(perm);
-
-                            // todo: error handling?
-                            tx.send(()).unwrap();
-                            self.in_flight.lock().await.remove(&key);
-                            Ok(f)
                         }
                     }
                 }
             }
+            panic!("reaching this is a bug, all mach arms above need to terminate on their own");
         }
     }
 }
 
 #[test]
 fn cache_simple() {
-    pretty_env_logger::formatted_builder()
+    env_logger::builder()
         .is_test(true)
         .filter_level(log::LevelFilter::Debug)
         .try_init()

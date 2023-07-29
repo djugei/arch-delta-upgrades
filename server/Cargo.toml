@@ -12,11 +12,13 @@ tokio = { version = "*", features = ["rt", "rt-multi-thread", "sync", "fs", "io-
 tokio-util = { version = "*", features = ["io"] }
 futures-util = "*"
 log = "*"
-pretty_env_logger = "*"
+env_logger = "*"
 ddelta = "*"
 zstd = "*"
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 parsing = {path = "../parsing"}
+thiserror = "*"
+anyhow = "*"
 
 [dev-dependencies]
 tempfile = "*"

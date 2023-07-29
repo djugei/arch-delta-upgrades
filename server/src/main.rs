@@ -5,8 +5,9 @@ use axum::{
     routing::get,
     Router,
 };
-use log::debug;
+use log::{debug, error};
 use std::{path::PathBuf, sync::Arc};
+use thiserror::Error;
 use tokio::fs::File;
 
 use cache::FileCache;
@@ -23,7 +24,7 @@ type Str = Box<str>;
 use reqwest::Client;
 
 fn main() {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let mut path = PathBuf::from(LOCAL);
     path.push("pkg");
@@ -32,6 +33,13 @@ fn main() {
     path.push("delta");
     std::fs::create_dir_all(path).unwrap();
 
+    #[derive(Error, Debug)]
+    enum DownloadError {
+        #[error("could not write to file")]
+        Io(#[from] std::io::Error),
+        #[error("http request failed")]
+        Req(#[from] reqwest::Error),
+    }
     let package_cache = {
         let kf = |s: &_, p: &Package| {
             let mut path = PathBuf::from(LOCAL);
@@ -43,25 +51,35 @@ fn main() {
             client: Client,
             key: Package,
             mut file: File,
-        ) -> Result<File, std::io::Error> {
+        ) -> Result<File, DownloadError> {
             let mut uri = String::new();
             uri.push_str(MIRROR);
             uri.push_str(&key.to_string());
             match client.get(uri).send().await {
                 Ok(mut response) => {
                     use tokio::io::AsyncWriteExt;
-                    while let Some(mut chunk) = response.chunk().await.unwrap() {
+                    while let Some(mut chunk) = response.chunk().await? {
                         file.write_all_buf(&mut chunk).await?;
                     }
                     Ok(file)
                 }
                 //fixme: return Ok(None) on 404
-                Err(e) => panic!("{}", e),
+                Err(e) => return Err(e.into()),
             }
         }
         let f = |s: Client, key: Package, file: File| Box::pin(inner_f(s, key, file)) as _;
         FileCache::new(Client::new(), kf, f, 8.into())
     };
+
+    #[derive(Error, Debug)]
+    enum DeltaError {
+        #[error("could not download file")]
+        Download(#[from] DownloadError),
+        #[error("io error")]
+        Io(#[from] std::io::Error),
+        #[error("other")]
+        Other(#[from] anyhow::Error),
+    }
     let delta_cache = {
         let kf = |_: &_, d: &Delta| {
             let mut p = PathBuf::from(LOCAL);
@@ -71,10 +89,10 @@ fn main() {
         };
 
         async fn inner_f<S, KF, F>(
-            state: Arc<FileCache<Package, S, KF, F, std::io::Error>>,
+            state: Arc<FileCache<Package, S, KF, F, DownloadError>>,
             key: Delta,
             patch: File,
-        ) -> Result<File, std::io::Error>
+        ) -> Result<File, DeltaError>
         where
             S: Clone + Send,
             KF: Send + Fn(&S, &Package) -> PathBuf,
@@ -84,7 +102,7 @@ fn main() {
                     Package,
                     File,
                 ) -> std::pin::Pin<
-                    Box<dyn core::future::Future<Output = Result<File, std::io::Error>> + Send>,
+                    Box<dyn core::future::Future<Output = Result<File, DownloadError>> + Send>,
                 >,
         {
             let old = state.get_or_generate(key.clone().get_old());
@@ -98,21 +116,19 @@ fn main() {
             let new = new.into_std().await;
             let mut new = zstd::Decoder::new(new)?;
 
-            let f = tokio::spawn(async move {
-                let mut zpatch = zstd::Encoder::new(patch, 20)?;
-                ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
-                    ddelta::State::Reading => debug!("reading"),
-                    ddelta::State::Sorting => debug!("sorting"),
-                    ddelta::State::Working(p) => {
-                        debug!("working: {}KB done", p / (1024))
-                    }
-                })
-                .unwrap();
-                zpatch.finish()
-            })
-            .await
-            .unwrap()
-            .unwrap();
+            let f: tokio::task::JoinHandle<Result<_, DeltaError>> =
+                tokio::task::spawn_blocking(move || {
+                    let mut zpatch = zstd::Encoder::new(patch, 20)?;
+                    ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
+                        ddelta::State::Reading => debug!("reading"),
+                        ddelta::State::Sorting => debug!("sorting"),
+                        ddelta::State::Working(p) => {
+                            debug!("working: {}KB done", p / (1024))
+                        }
+                    })?;
+                    Ok(zpatch.finish()?)
+                });
+            let f = f.await.expect("threading error")?;
 
             let f = File::from_std(f);
 
@@ -127,24 +143,33 @@ fn main() {
 
     let delta = |State(s): State<Arc<FileCache<_, _, _, _, _>>>,
                  Path((from, to)): Path<(Str, Str)>| async move {
-        let from = Package::try_from(&*from).unwrap();
-        let to = Package::try_from(&*to).unwrap();
-        let delta: Delta = (from, to).try_into().unwrap();
-        let future = s.get_or_generate(delta.clone());
-        let file = future.await.unwrap().unwrap();
-        let len = file.metadata().await.unwrap().len();
-        let stream = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::StreamBody::new(stream);
-        use hyper::header;
-        let headers = [
-            (header::CONTENT_LENGTH, len.to_string()),
-            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+        let c = || async {
+            let from = Package::try_from(&*from)?;
+            let to = Package::try_from(&*to)?;
+            let delta: Delta = (from, to).try_into()?;
+            let future = s.get_or_generate(delta.clone());
+            let file = future.await??;
+            let len = file.metadata().await?.len();
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let body = axum::body::StreamBody::new(stream);
+            use hyper::header;
+            let headers = [
+                (header::CONTENT_LENGTH, len.to_string()),
+                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", delta),
+                ),
+            ];
+            anyhow::Ok((StatusCode::OK, headers, body))
+        };
+        c().await.map_err(|e| {
+            error!("{:?}", e);
             (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", delta),
-            ),
-        ];
-        (StatusCode::OK, headers, body)
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("error producing delta: {}", e),
+            )
+        })
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
