@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
-    sync::Arc,
 };
 
 use clap::Parser;
@@ -56,7 +55,7 @@ fn main() {
         .target(env_logger::Target::Pipe(Box::new(write)))
         .init();
 
-    let multi = Arc::new(MultiProgress::new());
+    let multi = MultiProgress::new();
 
     {
         let m = multi.clone();
@@ -114,7 +113,7 @@ fn main() {
     }
 }
 
-fn upgrade(server: Url, delta_cache: PathBuf, multi: Arc<MultiProgress>) -> std::io::Result<()> {
+fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::Result<()> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let lines: Vec<_> = upgrades
         .lines()
@@ -304,7 +303,7 @@ fn apply_patch(
     orig: &Path,
     patch: &Path,
     new: &Path,
-    multi: Arc<MultiProgress>,
+    multi: MultiProgress,
 ) -> Result<(), std::io::Error> {
     let style = ProgressStyle::with_template(
         "{prefix} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}",
