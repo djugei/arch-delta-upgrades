@@ -106,7 +106,7 @@ fn upgrade(server: Url, multi: Arc<MultiProgress>) -> std::io::Result<()> {
                             .unwrap();
 
                         let style = ProgressStyle::with_template(
-                        "{prefix}{message} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
+                        "{prefix}{msg} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
         .progress_chars("█▇▆▅▄▃▂▁  ");
 
                         let pg = ProgressBar::new(0)
