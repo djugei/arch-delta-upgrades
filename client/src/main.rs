@@ -27,9 +27,26 @@ enum Commands {
         patch: PathBuf,
         new: PathBuf,
     },
-    Upgrade {
-        server: Url,
-    },
+    /// Download the newest packages to the provided delta_cache path
+    ///
+    /// If delta_cache is somewhere you can write, no sudo is needed.
+    ///
+    /// ```bash
+    /// $ pacman -Sy
+    ///
+    /// $ deltaclient http://bogen.moeh.re/arch path
+    /// $ sudo cp path/*.pkg path/*.sig /var/cache/pacman/pkg/
+    /// ## or
+    /// $ sudo deltaclient http://bogen.moeh.re/arch /var/cache/pacman/pkg/
+    ///
+    /// $ pacman -Su
+    /// ```
+    ///
+    /// If you are doing a full sysupgrade try the upgrade subcommand for more comfort.
+    #[command(verbatim_doc_comment)]
+    Download { server: Url, delta_cache: PathBuf },
+    /// run an entire upgrade, calling pacman interally, needs sudo to run.
+    Upgrade { server: Url },
 }
 
 fn main() {
@@ -61,11 +78,43 @@ fn main() {
         Commands::Patch { orig, patch, new } => {
             apply_patch(&orig, &patch, &new, multi).unwrap();
         }
-        Commands::Upgrade { server } => upgrade(server, multi).unwrap(),
+        Commands::Upgrade { server } => {
+            info!("running pacman -Sy");
+            let exit = Command::new("pacman")
+                .arg("-Sy")
+                .spawn()
+                .expect("could not run pacman -Sy")
+                .wait()
+                .expect("error waiting for pacman -Sy");
+            if !exit.success() {
+                panic!("pacman -Sy failed, aborting");
+            }
+
+            let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
+            upgrade(server, cachepath, multi).unwrap();
+
+            info!("running pacman -Su to install updates");
+            let exit = Command::new("pacman")
+                .args(["-Su", "--noconfirm"])
+                .spawn()
+                .expect("could not run pacman -Su")
+                .wait()
+                .expect("error waiting for pacman -Su");
+            if !exit.success() {
+                panic!("pacman -Su failed, aborting. Fix errors and try again");
+            }
+        }
+        Commands::Download {
+            server,
+            delta_cache,
+        } => {
+            std::fs::create_dir_all(&delta_cache).unwrap();
+            upgrade(server, delta_cache, multi).unwrap()
+        }
     }
 }
 
-fn upgrade(server: Url, multi: Arc<MultiProgress>) -> std::io::Result<()> {
+fn upgrade(server: Url, delta_cache: PathBuf, multi: Arc<MultiProgress>) -> std::io::Result<()> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let lines: Vec<_> = upgrades
         .lines()
@@ -90,13 +139,14 @@ fn upgrade(server: Url, multi: Arc<MultiProgress>) -> std::io::Result<()> {
                 let maxpar = maxpar.clone();
                 let server = server.clone();
                 let multi = multi.clone();
+                let delta_cache = delta_cache.clone();
                 set.spawn(async move {
                     debug!("spawned thread for {}", &line);
                     let (_, filename) = line.rsplit_once('/').unwrap();
                     let filefut = async {
                     if let Some((oldname, oldpath)) = newest_cached(filename).unwrap() {
                         // delta download
-                        let mut file_name = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                        let mut file_name = delta_cache.clone();
                         file_name.push(filename);
                         let mut deltafile_name = file_name.clone();
                         deltafile_name.as_mut_os_string().push(".delta");
@@ -146,7 +196,7 @@ fn upgrade(server: Url, multi: Arc<MultiProgress>) -> std::io::Result<()> {
                         .unwrap();
                     } else {
                         //conventional download
-                        let mut file = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                        let mut file = delta_cache.clone();
                         file.push(filename);
                         let mut file = tokio::fs::File::create(file).await.unwrap();
 
@@ -180,7 +230,7 @@ fn upgrade(server: Url, multi: Arc<MultiProgress>) -> std::io::Result<()> {
 
                     let sigfut = async {
                         // todo: could do this in parallel
-                        let mut sigfile = PathBuf::from_str("/var/cache/pacman/pkg/").unwrap();
+                        let mut sigfile = delta_cache.clone();
                         sigfile.push(filename);
                         sigfile.as_mut_os_string().push(".sig");
                         let mut sigfile = tokio::fs::File::create(sigfile).await.unwrap();
