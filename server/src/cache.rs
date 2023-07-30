@@ -91,6 +91,18 @@ where
                                     return Err(e);
                                 }
                             };
+                            // i hope this locking logic is sound:
+                            // if multiple threads detect a crashed channel then only the first
+                            // once has an equal channel
+                            // other ones get either an empty entry or a new entry with a different
+                            // channel
+                            let mut in_flight = self.in_flight.lock().await;
+                            if let Entry::Occupied(entry) = (*in_flight).entry(key.clone()) {
+                                if e.same_channel(entry.get()) {
+                                    entry.remove();
+                                }
+                            }
+                            drop(in_flight);
                             continue;
                         }
                     }
