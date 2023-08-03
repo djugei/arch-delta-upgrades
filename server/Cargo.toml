@@ -14,7 +14,7 @@ futures-util = "*"
 log = "*"
 env_logger = "*"
 ddelta = "*"
-zstd = "*"
+zstd = { version = "*", features = ["zstdmt"] }
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 parsing = {path = "../parsing"}
 thiserror = "*"

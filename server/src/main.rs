@@ -118,12 +118,21 @@ fn main() {
 
             let f: tokio::task::JoinHandle<Result<_, DeltaError>> =
                 tokio::task::spawn_blocking(move || {
-                    let mut zpatch = zstd::Encoder::new(patch, 20)?;
+                    let mut zpatch = zstd::Encoder::new(patch, 22)?;
+                    let e = zpatch.set_parameter(zstd::zstd_safe::CParameter::NbWorkers(4));
+                    if let Err(e) = e {
+                        debug!("failed to make zstd multithread");
+                    }
+                    let mut last_report = 0;
                     ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
                         ddelta::State::Reading => debug!("reading"),
                         ddelta::State::Sorting => debug!("sorting"),
                         ddelta::State::Working(p) => {
-                            debug!("working: {}KB done", p / (1024))
+                            const MB: u64 = 1024 * 1024;
+                            if p > last_report + (8 * MB) {
+                                debug!("working: {}MB done", p / MB);
+                                last_report = p;
+                            }
                         }
                     })?;
                     Ok(zpatch.finish()?)
@@ -147,8 +156,18 @@ fn main() {
             let from = Package::try_from(&*from)?;
             let to = Package::try_from(&*to)?;
             let delta: Delta = (from, to).try_into()?;
-            let future = s.get_or_generate(delta.clone());
-            let file = future.await??;
+
+            let file = {
+                let delta = delta.clone();
+                let (snd, rcv) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let f = s.get_or_generate(delta).await;
+                    snd.send(f).expect("request was probably canceled");
+                });
+                rcv.await
+                    .expect("uncaught error in FileCache, thats a bug")??
+            };
+
             let len = file.metadata().await?.len();
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = axum::body::StreamBody::new(stream);
@@ -171,7 +190,7 @@ fn main() {
             )
         })
     };
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()

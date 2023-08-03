@@ -16,8 +16,8 @@ itertools = "*"
 log = "*"
 env_logger = "*"
 parsing = {path = "../parsing"}
-tokio = {version = "*", features = ["fs", "rt", "macros"]}
-pipe = "*"
+tokio = {version = "*", features = ["fs", "rt", "macros", "rt-multi-thread"]}
+indicatif-log-bridge = "*"
 
 [[bin]]
 name = "deltaclient"

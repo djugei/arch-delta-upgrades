@@ -1,5 +1,5 @@
 use core::future::Future;
-use log::debug;
+use log::{debug, trace};
 use std::{collections::HashMap, hash::Hash, io::ErrorKind, path::PathBuf, pin::Pin};
 
 use tokio::{fs::File, io::AsyncSeekExt, sync::Mutex, sync::Semaphore};
@@ -126,9 +126,9 @@ where
                                 drop(in_flight);
 
                                 let perm = if let Some(sem) = &self.max_para {
-                                    debug!("sem get {:?}", path);
+                                    trace!("sem get {:?}", path);
                                     let s = Some(sem.acquire().await);
-                                    debug!("sem gotten {:?}", path);
+                                    trace!("sem gotten {:?}", path);
                                     s
                                 } else {
                                     None

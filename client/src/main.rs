@@ -50,23 +50,13 @@ enum Commands {
 
 fn main() {
     // set up a logger that does not conflict with progress bars
-    let (read, write) = pipe::pipe();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Pipe(Box::new(write)))
-        .init();
-
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
     let multi = MultiProgress::new();
 
-    {
-        let m = multi.clone();
-        std::thread::spawn(move || {
-            let br = std::io::BufReader::new(read);
-            for line in br.lines() {
-                let line = line.unwrap();
-                m.println(&line).unwrap();
-            }
-        });
-    }
+    indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
+        .try_init()
+        .unwrap();
 
     let args = Commands::parse();
 
@@ -75,7 +65,8 @@ fn main() {
             gen_delta(&orig, &new, &patch).unwrap();
         }
         Commands::Patch { orig, patch, new } => {
-            apply_patch(&orig, &patch, &new, multi).unwrap();
+            let pb = multi.add(ProgressBar::new(0));
+            apply_patch(&orig, &patch, &new, pb).unwrap();
         }
         Commands::Upgrade { server } => {
             info!("running pacman -Sy");
@@ -124,7 +115,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
 
     info!("downloading {} updates", lines.len());
 
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
@@ -172,12 +163,15 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         url.push_str(&oldname);
                         url.push('/');
                         url.push_str(filename);
-                        let guard = maxpar.acquire().await;
                         let mut delta = client.get(url).send().await.unwrap();
                         pg.set_length(delta.content_length().unwrap_or(0));
                         pg.set_message("");
                         pg.tick();
 
+                        // acquire guard after sending request but before using the body
+                        // so the deltas can get generated on the server as parallel as possible
+                        // but the download does not get fragmented/overwhelmed
+                        let guard = maxpar.acquire().await;
                         while let Some(chunk) = delta.chunk().await.unwrap() {
                             let len = chunk.len();
                             deltafile.write_all(&chunk).await.unwrap();
@@ -185,50 +179,24 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         }
                         drop(guard);
                         info!("downloaded {} in {} seconds", deltafile_name.display(), pg.elapsed().as_secs_f64());
-                        pg.finish_and_clear();
-                        multi.remove(&pg);
 
-                        tokio::task::spawn(async move {
-                            apply_patch(&oldpath, &deltafile_name, &file_name, multi).unwrap()
-                        })
-                        .await
-                        .unwrap();
-                    } else {
-                        //conventional download
-                        let mut file = delta_cache.clone();
-                        file.push(filename);
-                        let mut file = tokio::fs::File::create(file).await.unwrap();
-
-
-                        // just one conventional download
-                        let guard = maxpar.acquire_many(3).await;
-                        let mut res = client.get(&line).send().await.unwrap();
-
-                        let style = ProgressStyle::with_template(
-                        "{prefix} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
-        .progress_chars("█▇▆▅▄▃▂▁  ");
-
-                        let pg = ProgressBar::new(res.content_length().unwrap_or(0))
-                            .with_style(style)
-                            .with_prefix(format!("(regular) download {}", filename));
-                        let pg = multi.add(pg);
-                        pg.tick();
-
-                        while let Some(chunk) = res.chunk().await.unwrap() {
-                            let len = chunk.len();
-                            file.write_all(&chunk).await.unwrap();
-                            pg.inc(len.try_into().unwrap());
+                        {
+                            let p_pg = ProgressBar::new(0);
+                            let p_pg = multi.insert_after(&pg, p_pg);
+                            pg.finish_and_clear();
+                            multi.remove(&pg);
+                            tokio::task::spawn_blocking(move || {
+                                apply_patch(&oldpath, &deltafile_name, &file_name, p_pg).unwrap()
+                            })
+                            .await
+                            .unwrap();
                         }
-                        drop(guard);
-
-                        info!("downloaded {} in {} seconds", filename, pg.elapsed().as_secs_f64());
-                        pg.finish_and_clear();
-                        multi.remove(&pg);
+                    } else {
+                        info!("no cached package found, leaving {} for pacman", filename);
                     }
                     };
 
                     let sigfut = async {
-                        // todo: could do this in parallel
                         let mut sigfile = delta_cache.clone();
                         sigfile.push(filename);
                         sigfile.as_mut_os_string().push(".sig");
@@ -303,7 +271,7 @@ fn apply_patch(
     orig: &Path,
     patch: &Path,
     new: &Path,
-    multi: MultiProgress,
+    pb: ProgressBar,
 ) -> Result<(), std::io::Error> {
     let style = ProgressStyle::with_template(
         "{prefix} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}",
@@ -311,17 +279,17 @@ fn apply_patch(
     .unwrap()
     .progress_chars("█▇▆▅▄▃▂▁  ");
 
-    let pg = ProgressBar::new(0).with_style(style).with_prefix(format!(
+    pb.set_style(style);
+    pb.set_prefix(format!(
         "patching {}",
         new.file_name().unwrap().to_string_lossy()
     ));
-    let pg = multi.add(pg);
 
     let orig = OpenOptions::new().read(true).open(orig)?;
     let orig = zstd::decode_all(orig)?;
-    pg.set_length(orig.len().try_into().unwrap());
+    pb.set_length(orig.len().try_into().unwrap());
     let orig = Cursor::new(orig);
-    let mut orig = pg.wrap_read(orig);
+    let mut orig = pb.wrap_read(orig);
     orig.progress.tick();
 
     let patch = OpenOptions::new().read(true).open(patch)?;
@@ -349,7 +317,6 @@ fn apply_patch(
         handle.join().unwrap()?;
     }
     orig.progress.finish_and_clear();
-    multi.remove(&orig.progress);
     info!("patched {}", new.file_name().unwrap().to_string_lossy());
 
     Ok(())
