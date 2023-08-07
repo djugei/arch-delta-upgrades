@@ -19,6 +19,5 @@ reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 parsing = {path = "../parsing"}
 thiserror = "*"
 anyhow = "*"
+async_file_cache = {path = "../async_file_cache"}
 
-[dev-dependencies]
-tempfile = "*"

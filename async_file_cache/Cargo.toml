@@ -1,0 +1,15 @@
+[package]
+name = "async_file_cache"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "*", features = ["sync", "fs", "io-util", "macros"] }
+log = "*"
+
+[dev-dependencies]
+tempfile = "*"
+env_logger = "*"
+futures-util = "*"

@@ -163,7 +163,6 @@ where
                     }
                 }
             }
-            panic!("reaching this is a bug, all mach arms above need to terminate on their own");
         }
     }
 }

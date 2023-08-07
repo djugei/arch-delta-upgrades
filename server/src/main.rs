@@ -11,11 +11,9 @@ use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::fs::File;
 
-use cache::FileCache;
+use async_file_cache::FileCache;
 
 use parsing::{Delta, Package};
-
-mod cache;
 
 const MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
 const LOCAL: &str = "./deltaserver/";

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "client", "server", "parsing"]
+members = ["client", "server", "parsing", "async_file_cache"]
 resolver = "2"
 
 
