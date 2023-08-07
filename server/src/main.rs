@@ -34,13 +34,6 @@ fn main() {
     path.push("delta");
     std::fs::create_dir_all(path).unwrap();
 
-    #[derive(Error, Debug)]
-    enum DownloadError {
-        #[error("could not write to file")]
-        Io(#[from] std::io::Error),
-        #[error("http request failed")]
-        Req(#[from] reqwest::Error),
-    }
     let package_cache = {
         let kf = |s: &_, p: &Package| {
             let mut path = PathBuf::from(LOCAL);
@@ -71,15 +64,6 @@ fn main() {
         FileCache::new(Client::new(), kf, inner_f, 8.into())
     };
 
-    #[derive(Error, Debug)]
-    enum DeltaError {
-        #[error("could not download file")]
-        Download(#[from] DownloadError),
-        #[error("io error")]
-        Io(#[from] std::io::Error),
-        #[error("other")]
-        Other(#[from] anyhow::Error),
-    }
     let delta_cache = {
         let kf = |_: &_, d: &Delta| {
             let mut p = PathBuf::from(LOCAL);
@@ -141,46 +125,6 @@ fn main() {
     };
     let delta_cache = Arc::new(delta_cache);
 
-    let delta = |State(s): State<Arc<FileCache<_, _, _, _, _, DeltaError>>>,
-                 Path((from, to)): Path<(Str, Str)>| async move {
-        let c = || async {
-            let from = Package::try_from(&*from)?;
-            let to = Package::try_from(&*to)?;
-            let delta: Delta = (from, to).try_into()?;
-
-            let file = {
-                let delta = delta.clone();
-                let (snd, rcv) = tokio::sync::oneshot::channel();
-                tokio::spawn(async move {
-                    let f = s.get_or_generate(delta).await;
-                    snd.send(f).expect("request was probably canceled");
-                });
-                rcv.await
-                    .expect("uncaught error in FileCache, thats a bug")??
-            };
-
-            let len = file.metadata().await?.len();
-            let stream = tokio_util::io::ReaderStream::new(file);
-            let body = axum::body::StreamBody::new(stream);
-            use hyper::header;
-            let headers = [
-                (header::CONTENT_LENGTH, len.to_string()),
-                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", delta),
-                ),
-            ];
-            anyhow::Ok((StatusCode::OK, headers, body))
-        };
-        c().await.map_err(|e| {
-            error!("{:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("error producing delta: {}", e),
-            )
-        })
-    };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -189,7 +133,7 @@ fn main() {
             let app = Router::new()
                 .fallback(fallback)
                 .route("/", get(root))
-                .route("/arch/:from/:to", get(delta))
+                .route("/arch/:from/:to", get(gen_delta))
                 .with_state(delta_cache);
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -198,6 +142,80 @@ fn main() {
                 .await
                 .unwrap();
         })
+}
+#[derive(Error, Debug)]
+enum DownloadError {
+    #[error("could not write to file")]
+    Io(#[from] std::io::Error),
+    #[error("http request failed")]
+    Req(#[from] reqwest::Error),
+}
+#[derive(Error, Debug)]
+enum DeltaError {
+    #[error("could not download file")]
+    Download(#[from] DownloadError),
+    #[error("io error")]
+    Io(#[from] std::io::Error),
+    #[error("other")]
+    Other(#[from] anyhow::Error),
+}
+use axum::body::StreamBody;
+use hyper::header::HeaderName;
+use tokio_util::io::ReaderStream;
+async fn gen_delta<S, KF, F, FF>(
+    State(s): State<Arc<FileCache<Delta, S, KF, F, FF, DeltaError>>>,
+    Path((from, to)): Path<(Str, Str)>,
+) -> Result<
+    (
+        StatusCode,
+        [(HeaderName, String); 3],
+        StreamBody<ReaderStream<File>>,
+    ),
+    (StatusCode, String),
+>
+where
+    S: Send + Sync + 'static + Clone,
+    KF: Send + Sync + 'static + Fn(&S, &Delta) -> PathBuf,
+    F: Send + Sync + 'static + Fn(S, Delta, File) -> FF,
+    FF: Send + 'static + Future<Output = Result<File, DeltaError>>,
+{
+    let c = || async {
+        let from = Package::try_from(&*from)?;
+        let to = Package::try_from(&*to)?;
+        let delta: Delta = (from, to).try_into()?;
+
+        let file = {
+            let delta = delta.clone();
+            let (snd, rcv) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let f = s.get_or_generate(delta).await;
+                snd.send(f).expect("request was probably canceled");
+            });
+            rcv.await
+                .expect("uncaught error in FileCache, thats a bug")??
+        };
+
+        let len = file.metadata().await?.len();
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let body = axum::body::StreamBody::new(stream);
+        use hyper::header;
+        let headers = [
+            (header::CONTENT_LENGTH, len.to_string()),
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", delta),
+            ),
+        ];
+        anyhow::Ok((StatusCode::OK, headers, body))
+    };
+    c().await.map_err(|e| {
+        error!("{:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("error producing delta: {}", e),
+        )
+    })
 }
 
 async fn root() -> (StatusCode, &'static str) {
