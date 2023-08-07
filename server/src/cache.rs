@@ -1,8 +1,9 @@
 use core::future::Future;
 use log::{debug, trace};
-use std::{collections::HashMap, hash::Hash, io::ErrorKind, path::PathBuf, pin::Pin};
+use std::{collections::HashMap, hash::Hash, io::ErrorKind, path::PathBuf, pin::pin};
 
-use tokio::{fs::File, io::AsyncSeekExt, sync::Mutex, sync::Semaphore};
+use tokio::io::AsyncSeekExt;
+use tokio::{fs::File, sync::Mutex, sync::Semaphore};
 /**
     File-Backed Cache:
     Execute an expensive opertion to generate a Resource and store the results in a file on disk.
@@ -13,14 +14,13 @@ use tokio::{fs::File, io::AsyncSeekExt, sync::Mutex, sync::Semaphore};
     It is possible to set a max parallelism level.
     todo: streaming, currently the whole thing is generated at once
 */
-pub struct FileCache<Key, S, KF, F, E>
+pub struct FileCache<Key, S, KF, F, FF, E>
 where
     Key: Hash + PartialEq + Eq + Clone + Send,
     S: Clone + Send,
     KF: Send + Fn(&S, &Key) -> PathBuf,
-    // would love for this to not use boxes but thats just how things are currently with rust and
-    // futures
-    F: Send + Fn(S, Key, File) -> Pin<Box<dyn Future<Output = Result<File, E>> + Send>>,
+    F: Send + Fn(S, Key, File) -> FF,
+    FF: Future<Output = Result<File, E>> + Send,
     E: Send,
 {
     in_flight: tokio::sync::Mutex<HashMap<Key, tokio::sync::watch::Receiver<()>>>,
@@ -30,12 +30,13 @@ where
     f: F,
 }
 
-impl<Key, S, KF, F, E> FileCache<Key, S, KF, F, E>
+impl<Key, S, KF, F, FF, E> FileCache<Key, S, KF, F, FF, E>
 where
     Key: Hash + PartialEq + Eq + Clone + Send,
     S: Clone + Send,
     KF: Send + Fn(&S, &Key) -> PathBuf,
-    F: Send + Fn(S, Key, File) -> Pin<Box<dyn Future<Output = Result<File, E>> + Send>>,
+    F: Send + Fn(S, Key, File) -> FF,
+    FF: Future<Output = Result<File, E>> + Send,
     E: Send,
 {
     /**
@@ -136,11 +137,12 @@ where
                                 // do the expensive operation
 
                                 let f = (self.f)(self.state.clone(), key.clone(), w);
-                                let f = Box::pin(f);
+                                let f = std::pin::pin!(f);
                                 let f = f.await;
                                 let f = match f {
                                     Ok(mut f) => {
-                                        f.rewind().await?;
+                                        let pf = pin!(f.rewind());
+                                        pf.await?;
                                         f
                                     }
                                     Err(e) => {
@@ -182,9 +184,7 @@ fn cache_simple() {
         Ok(file)
     }
 
-    let f = |s: (), key: String, file: File| Box::pin(inner_f(s, key, file)) as _;
-
-    let c = FileCache::new((), kf, f, None);
+    let c = FileCache::new((), kf, inner_f, None);
 
     let tmpdir = tempfile::TempDir::new().unwrap();
     let basepath = tmpdir.path();

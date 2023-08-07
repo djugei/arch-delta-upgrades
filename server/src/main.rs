@@ -5,6 +5,7 @@ use axum::{
     routing::get,
     Router,
 };
+use core::future::Future;
 use log::{debug, error};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -64,11 +65,10 @@ fn main() {
                     Ok(file)
                 }
                 //fixme: return Ok(None) on 404
-                Err(e) => return Err(e.into()),
+                Err(e) => Err(e.into()),
             }
         }
-        let f = |s: Client, key: Package, file: File| Box::pin(inner_f(s, key, file)) as _;
-        FileCache::new(Client::new(), kf, f, 8.into())
+        FileCache::new(Client::new(), kf, inner_f, 8.into())
     };
 
     #[derive(Error, Debug)]
@@ -88,22 +88,16 @@ fn main() {
             p
         };
 
-        async fn inner_f<S, KF, F>(
-            state: Arc<FileCache<Package, S, KF, F, DownloadError>>,
+        async fn inner_f<S, KF, F, FF>(
+            state: Arc<FileCache<Package, S, KF, F, FF, DownloadError>>,
             key: Delta,
             patch: File,
         ) -> Result<File, DeltaError>
         where
             S: Clone + Send,
             KF: Send + Fn(&S, &Package) -> PathBuf,
-            F: Send
-                + Fn(
-                    S,
-                    Package,
-                    File,
-                ) -> std::pin::Pin<
-                    Box<dyn core::future::Future<Output = Result<File, DownloadError>> + Send>,
-                >,
+            F: Send + Fn(S, Package, File) -> FF,
+            FF: Future<Output = Result<File, DownloadError>> + Send,
         {
             let old = state.get_or_generate(key.clone().get_old());
             let new = state.get_or_generate(key.get_new());
@@ -143,14 +137,11 @@ fn main() {
 
             Ok(f)
         }
-
-        let f = |state, key: Delta, file: File| Box::pin(inner_f(state, key, file)) as _;
-
-        FileCache::new(Arc::new(package_cache), kf, f, 4.into())
+        FileCache::new(Arc::new(package_cache), kf, inner_f, 4.into())
     };
     let delta_cache = Arc::new(delta_cache);
 
-    let delta = |State(s): State<Arc<FileCache<_, _, _, _, _>>>,
+    let delta = |State(s): State<Arc<FileCache<_, _, _, _, _, DeltaError>>>,
                  Path((from, to)): Path<(Str, Str)>| async move {
         let c = || async {
             let from = Package::try_from(&*from)?;
