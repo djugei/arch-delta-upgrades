@@ -21,3 +21,7 @@ indicatif-log-bridge = "*"
 
 [[bin]]
 name = "deltaclient"
+
+[features]
+default = ["diff"]
+diff = []

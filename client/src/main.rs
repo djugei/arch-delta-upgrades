@@ -7,6 +7,7 @@ use std::{
 };
 
 use clap::Parser;
+use http::StatusCode;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info};
 use parsing::Package;
@@ -16,6 +17,7 @@ use tokio::{io::AsyncWriteExt, task::JoinSet};
 #[derive(Parser, Debug)]
 #[command(version, about)]
 enum Commands {
+    #[cfg(feature = "diff")]
     Delta {
         orig: PathBuf,
         new: PathBuf,
@@ -61,6 +63,7 @@ fn main() {
     let args = Commands::parse();
 
     match args {
+        #[cfg(feature = "diff")]
         Commands::Delta { orig, new, patch } => {
             gen_delta(&orig, &new, &patch).unwrap();
         }
@@ -120,13 +123,23 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
         .build()
         .unwrap()
         .block_on(async {
-            let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+            let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
             let client = reqwest::Client::new();
+
+            let total_pg = ProgressBar::new(lines.len().try_into().unwrap())
+                .with_style(ProgressStyle::with_template("#### {msg} [{wide_bar}] {pos}/{len} elapsed: {elapsed} eta: {eta} ####").unwrap())
+                .with_message("total progress:")
+                ;
+            let total_pg = multi.add(total_pg);
+            total_pg.tick();
+
 
             let mut set = JoinSet::new();
             for line in lines {
                 let client = client.clone();
                 let maxpar = maxpar.clone();
+                let maxpar_req = maxpar_req.clone();
                 let server = server.clone();
                 let multi = multi.clone();
                 let delta_cache = delta_cache.clone();
@@ -146,9 +159,10 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                             .unwrap();
 
                         let style = ProgressStyle::with_template(
-                        "{prefix}{msg} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
+                        "{prefix}{msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
         .progress_chars("█▇▆▅▄▃▂▁  ");
 
+                        let guard = maxpar_req.acquire().await;
                         let pg = ProgressBar::new(0)
                             .with_style(style)
                             .with_prefix(format!("deltadownload {}", filename))
@@ -163,7 +177,24 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         url.push_str(&oldname);
                         url.push('/');
                         url.push_str(filename);
-                        let mut delta = client.get(url).send().await.unwrap();
+                        let mut delta = {
+                            loop {
+                                // catch both client and server timeouts and simply retry
+                                match client.get(&url).send().await {
+                                    Ok(d) => { match d.status() {
+                                        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {debug!("retrying request {}", url)}
+                                        status if !status.is_success() => panic!("request failed with{}", status),
+                                        _=> break d,
+                                        }
+                                    }
+                                    Err(e) => if !e.is_timeout(){
+                                        panic!("{}", e);
+                                        },
+                            }
+                            debug!("timeout; retrying {}", &url);
+                            }
+                        };
+                        std::mem::drop(guard);
                         pg.set_length(delta.content_length().unwrap_or(0));
                         pg.set_message("");
                         pg.tick();
@@ -204,7 +235,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
 
                         let mut sigline = line.to_owned();
                         sigline.push_str(".sig");
-                        info!("getting signature from {}", sigline);
+                        debug!("getting signature from {}", sigline);
                         let mut res = client.get(&sigline).send().await.unwrap();
                         while let Some(chunk) = res.chunk().await.unwrap() {
                             sigfile.write_all(&chunk).await.unwrap()
@@ -221,6 +252,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                     error!("if the error is temporary, you can try running the command again");
 
                 }
+                total_pg.inc(1);
             }
         });
     Ok(())
@@ -248,6 +280,7 @@ fn newest_cached(filename: &str) -> std::io::Result<Option<(String, PathBuf)>> {
     Ok(local.pop())
 }
 
+#[cfg(feature = "diff")]
 fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error> {
     let orig = OpenOptions::new().read(true).open(orig).unwrap();
     let mut orig = zstd::Decoder::new(orig)?;
@@ -259,7 +292,7 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
         .create(true)
         .open(patch)
         .unwrap();
-    let mut patch = zstd::Encoder::new(patch, 20)?;
+    let mut patch = zstd::Encoder::new(patch, 22)?;
 
     ddelta::generate_chunked(&mut orig, &mut new, &mut patch, None, |_| {}).unwrap();
     patch.do_finish()?;
