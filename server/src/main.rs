@@ -135,10 +135,8 @@ fn main() {
                 .with_state(delta_cache);
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
-            axum::Server::bind(&addr)
-                .serve(app.into_make_service())
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener,app).await.unwrap();
         })
 }
 #[derive(Error, Debug)]
@@ -157,9 +155,8 @@ enum DeltaError {
     #[error("other")]
     Other(#[from] anyhow::Error),
 }
-use axum::body::StreamBody;
-use hyper::header::HeaderName;
-use tokio_util::io::ReaderStream;
+use axum::body::Body;
+use axum::http::HeaderName;
 async fn gen_delta<S, KF, F, FF>(
     State(s): State<Arc<FileCache<Delta, S, KF, F, FF, DeltaError>>>,
     Path((from, to)): Path<(Str, Str)>,
@@ -167,7 +164,7 @@ async fn gen_delta<S, KF, F, FF>(
     (
         StatusCode,
         [(HeaderName, String); 3],
-        StreamBody<ReaderStream<File>>,
+        Body,
     ),
     (StatusCode, String),
 >
@@ -195,8 +192,8 @@ where
 
         let len = file.metadata().await?.len();
         let stream = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::StreamBody::new(stream);
-        use hyper::header;
+        let body = axum::body::Body::from_stream(stream);
+        use axum::http::header;
         let headers = [
             (header::CONTENT_LENGTH, len.to_string()),
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
@@ -210,7 +207,7 @@ where
     c().await.map_err(|e| {
         error!("{:?}", e);
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::status::StatusCode::INTERNAL_SERVER_ERROR,
             format!("error producing delta: {}", e),
         )
     })
