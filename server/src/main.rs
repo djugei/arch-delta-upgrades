@@ -49,13 +49,16 @@ fn main() {
             uri.push_str(&key.to_string());
             match client.get(uri).send().await {
                 Ok(mut response) => {
-                    use tokio::io::AsyncWriteExt;
-                    while let Some(mut chunk) = response.chunk().await? {
-                        file.write_all_buf(&mut chunk).await?;
+                    if response.status().is_success() {
+                        use tokio::io::AsyncWriteExt;
+                        while let Some(mut chunk) = response.chunk().await? {
+                            file.write_all_buf(&mut chunk).await?;
+                        }
+                        Ok(file)
+                    } else {
+                        Err(DownloadError::Status(response.status()))
                     }
-                    Ok(file)
                 }
-                //fixme: return Ok(None) on 404
                 Err(e) => Err(e.into()),
             }
         }
@@ -136,7 +139,7 @@ fn main() {
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener,app).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
         })
 }
 #[derive(Error, Debug)]
@@ -144,7 +147,10 @@ enum DownloadError {
     #[error("could not write to file")]
     Io(#[from] std::io::Error),
     #[error("http request failed")]
-    Req(#[from] reqwest::Error),
+    Connection(#[from] reqwest::Error),
+    #[error("bad status code")]
+    Status(reqwest::StatusCode),
+
 }
 #[derive(Error, Debug)]
 enum DeltaError {
@@ -160,14 +166,7 @@ use axum::http::HeaderName;
 async fn gen_delta<S, KF, F, FF>(
     State(s): State<Arc<FileCache<Delta, S, KF, F, FF, DeltaError>>>,
     Path((from, to)): Path<(Str, Str)>,
-) -> Result<
-    (
-        StatusCode,
-        [(HeaderName, String); 3],
-        Body,
-    ),
-    (StatusCode, String),
->
+) -> Result<(StatusCode, [(HeaderName, String); 3], Body), (StatusCode, String)>
 where
     S: Send + Sync + 'static + Clone,
     KF: Send + Sync + 'static + Fn(&S, &Delta) -> PathBuf,
