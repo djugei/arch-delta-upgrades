@@ -7,11 +7,10 @@ use std::{
 };
 
 use clap::Parser;
-use http::StatusCode;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info};
 use parsing::Package;
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 #[derive(Parser, Debug)]
