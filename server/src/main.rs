@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use core::future::Future;
-use log::{debug, error};
+use log::{debug, error, info};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::fs::File;
@@ -16,6 +16,7 @@ use async_file_cache::FileCache;
 use parsing::{Delta, Package};
 
 const MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
+const FALLBACK_MIRROR: &str = "http://mirror.f4st.host/archlinux/pool/packages/";
 const LOCAL: &str = "./deltaserver/";
 
 type Str = Box<str>;
@@ -44,23 +45,29 @@ fn main() {
             key: Package,
             mut file: File,
         ) -> Result<File, DownloadError> {
+            use tokio::io::AsyncWriteExt;
+
             let mut uri = String::new();
             uri.push_str(MIRROR);
             uri.push_str(&key.to_string());
-            match client.get(uri).send().await {
-                Ok(mut response) => {
-                    if response.status().is_success() {
-                        use tokio::io::AsyncWriteExt;
-                        while let Some(mut chunk) = response.chunk().await? {
-                            file.write_all_buf(&mut chunk).await?;
-                        }
-                        Ok(file)
-                    } else {
-                        Err(DownloadError::Status(response.status()))
-                    }
-                }
-                Err(e) => Err(e.into()),
+            let mut response = client.get(uri).send().await?;
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                // fall back to live mirror
+                info!("using fallback mirror for {key}");
+                let mut uri = String::new();
+                uri.push_str(FALLBACK_MIRROR);
+                uri.push_str(&key.to_string());
+                response = client.get(uri).send().await?;
             }
+            if !response.status().is_success() {
+                return Err(DownloadError::Status{ status: response.status(), url: response.url().clone()})
+            }
+
+            while let Some(mut chunk) = response.chunk().await? {
+                file.write_all_buf(&mut chunk).await?;
+            }
+            Ok(file)
         }
         FileCache::new(Client::new(), kf, inner_f, 8.into())
     };
@@ -144,21 +151,21 @@ fn main() {
 }
 #[derive(Error, Debug)]
 enum DownloadError {
-    #[error("could not write to file")]
+    #[error("could not write to file: {0}")]
     Io(#[from] std::io::Error),
-    #[error("http request failed")]
+    #[error("http request failed: {0}")]
     Connection(#[from] reqwest::Error),
-    #[error("bad status code")]
-    Status(reqwest::StatusCode),
+    #[error("bad status code: {status} while fetching {url}")]
+    Status{ url: reqwest::Url, status: reqwest::StatusCode},
 
 }
 #[derive(Error, Debug)]
 enum DeltaError {
-    #[error("could not download file")]
+    #[error("could not download file: {0}")]
     Download(#[from] DownloadError),
-    #[error("io error")]
+    #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("other")]
+    #[error("other: {0}")]
     Other(#[from] anyhow::Error),
 }
 use axum::body::Body;
