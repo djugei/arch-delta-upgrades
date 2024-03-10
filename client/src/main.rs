@@ -4,14 +4,20 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
+    time::Duration,
 };
+
+use anyhow::Context;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info};
 use parsing::Package;
 use reqwest::{StatusCode, Url};
-use tokio::{io::AsyncWriteExt, task::JoinSet};
+use tokio::{
+    io::{AsyncSeekExt, AsyncWriteExt},
+    task::JoinSet,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -39,7 +45,7 @@ enum Commands {
     /// ## or
     /// $ sudo deltaclient http://bogen.moeh.re/arch /var/cache/pacman/pkg/
     ///
-    /// $ pacman -Su
+    /// $ sudo pacman -Su
     /// ```
     ///
     /// If you are doing a full sysupgrade try the upgrade subcommand for more comfort.
@@ -57,7 +63,7 @@ fn main() {
 
     indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
         .try_init()
-        .unwrap();
+        .expect("initializing logger failed");
 
     let args = Commands::parse();
 
@@ -106,7 +112,7 @@ fn main() {
     }
 }
 
-fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::Result<()> {
+fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::Result<()> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let lines: Vec<_> = upgrades
         .lines()
@@ -120,7 +126,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
+        .expect("could not build async runtime")
         .block_on(async {
             let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
             let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
@@ -130,6 +136,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                 .with_style(ProgressStyle::with_template("#### {msg} [{wide_bar}] {pos}/{len} elapsed: {elapsed} eta: {eta} ####").unwrap())
                 .with_message("total progress:")
                 ;
+            total_pg.enable_steady_tick(Duration::from_millis(100));
             let total_pg = multi.add(total_pg);
             total_pg.tick();
 
@@ -146,7 +153,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                     debug!("spawned thread for {}", &line);
                     let (_, filename) = line.rsplit_once('/').unwrap();
                     let filefut = async {
-                    if let Some((oldname, oldpath)) = newest_cached(filename).unwrap() {
+                    if let Some((oldname, oldpath)) = newest_cached(filename)? {
                         // delta download
                         let mut file_name = delta_cache.clone();
                         file_name.push(filename);
@@ -154,8 +161,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         deltafile_name.as_mut_os_string().push(".delta");
 
                         let mut deltafile = tokio::fs::File::create(deltafile_name.clone())
-                            .await
-                            .unwrap();
+                            .await?;
 
                         let style = ProgressStyle::with_template(
                         "{prefix}{msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}").unwrap()
@@ -165,7 +171,6 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         let pg = ProgressBar::new(0)
                             .with_style(style)
                             .with_prefix(format!("deltadownload {}", filename))
-                            // fixme: message is not being displayed?
                             .with_message(": waiting for server, this may take up to a few minutes")
                             ;
                         let pg = multi.add(pg);
@@ -202,10 +207,29 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                         // so the deltas can get generated on the server as parallel as possible
                         // but the download does not get fragmented/overwhelmed
                         let guard = maxpar.acquire().await;
-                        while let Some(chunk) = delta.chunk().await.unwrap() {
-                            let len = chunk.len();
-                            deltafile.write_all(&chunk).await.unwrap();
-                            pg.inc(len.try_into().unwrap());
+                        let mut tries = 0;
+                            'retry: loop {
+                                loop {
+                                    match delta.chunk().await {
+                                        Ok(Some(chunk)) => {
+                                            let len = chunk.len();
+                                            deltafile.write_all(&chunk).await?;
+                                            pg.inc(len.try_into().unwrap());
+                                        },
+                                        Ok(None) => break 'retry,
+                                        Err(e) => {
+                                            if tries <3 {
+                                                deltafile.seek(std::io::SeekFrom::Start(0)).await?;
+                                                pg.set_position(0);
+                                                debug!("download failed {tries}/3");
+                                                tries +=1;
+                                                continue 'retry;
+                                            } else {
+                                                anyhow::bail!(e);
+                                            }
+                                        },
+                                    }
+                                }
                         }
                         drop(guard);
                         info!("downloaded {} in {} seconds", deltafile_name.display(), pg.elapsed().as_secs_f64());
@@ -215,33 +239,37 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> std::io::
                             let p_pg = multi.insert_after(&pg, p_pg);
                             pg.finish_and_clear();
                             multi.remove(&pg);
-                            tokio::task::spawn_blocking(move || {
-                                apply_patch(&oldpath, &deltafile_name, &file_name, p_pg).unwrap()
+                            tokio::task::spawn_blocking(move || -> Result<_,_> {
+                                apply_patch(&oldpath, &deltafile_name, &file_name, p_pg)
                             })
-                            .await
-                            .unwrap();
+                            .await??;
                         }
                     } else {
                         info!("no cached package found, leaving {} for pacman", filename);
                     }
+                        Ok::<(),anyhow::Error>(())
                     };
 
                     let sigfut = async {
                         let mut sigfile = delta_cache.clone();
                         sigfile.push(filename);
                         sigfile.as_mut_os_string().push(".sig");
-                        let mut sigfile = tokio::fs::File::create(sigfile).await.unwrap();
+                        let mut sigfile = tokio::fs::File::create(sigfile).await?;
 
                         let mut sigline = line.to_owned();
                         sigline.push_str(".sig");
                         debug!("getting signature from {}", sigline);
-                        let mut res = client.get(&sigline).send().await.unwrap();
-                        while let Some(chunk) = res.chunk().await.unwrap() {
-                            sigfile.write_all(&chunk).await.unwrap()
+                        let mut res = client.get(&sigline).send().await?;
+                        while let Some(chunk) = res.chunk().await? {
+                            sigfile.write_all(&chunk).await?
                         }
+                        Ok::<(),anyhow::Error>(())
                     };
 
-                    tokio::join!(filefut, sigfut);
+                    let (f, s) = tokio::join!(filefut, sigfut);
+                    f.context("creating delat file failed")?;
+                    s.context("creating signature file failed")?;
+                    Ok::<(),anyhow::Error>(())
                 });
             }
 

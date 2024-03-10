@@ -18,6 +18,7 @@ env_logger = "*"
 parsing = {path = "../parsing"}
 tokio = {version = "*", features = ["fs", "rt", "macros", "rt-multi-thread"]}
 indicatif-log-bridge = "*"
+anyhow = "*"
 
 [[bin]]
 name = "deltaclient"
