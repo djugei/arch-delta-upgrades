@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 ddelta = "*"
-zstd = { version = "*", features = ["zstdmt"] }
+zstd = { version = "*", features = ["zstdmt", "experimental"] }
 indicatif = ">=0.17.0"
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 http = "*"
@@ -19,6 +19,7 @@ parsing = {path = "../parsing"}
 tokio = {version = "*", features = ["fs", "rt", "macros", "rt-multi-thread"]}
 indicatif-log-bridge = "*"
 anyhow = "*"
+memmap2 = "*"
 
 [[bin]]
 name = "deltaclient"

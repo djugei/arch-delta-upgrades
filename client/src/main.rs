@@ -74,6 +74,8 @@ fn main() {
         }
         Commands::Patch { orig, patch, new } => {
             let pb = multi.add(ProgressBar::new(0));
+            let orig = OpenOptions::new().read(true).open(orig).unwrap();
+            let orig = zstd::decode_all(orig).unwrap();
             apply_patch(&orig, &patch, &new, pb).unwrap();
         }
         Commands::Upgrade { server } => {
@@ -132,8 +134,8 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
             let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
             let client = reqwest::Client::new();
 
-            let total_pg = ProgressBar::new(lines.len().try_into().unwrap())
-                .with_style(ProgressStyle::with_template("#### {msg} [{wide_bar}] {pos}/{len} elapsed: {elapsed} eta: {eta} ####").unwrap())
+            let total_pg = ProgressBar::new(0)
+                .with_style(ProgressStyle::with_template("#### {msg} [{wide_bar}] {bytes}/{total_bytes} elapsed: {elapsed} eta: {eta} ####").unwrap())
                 .with_message("total progress:")
                 ;
             total_pg.enable_steady_tick(Duration::from_millis(100));
@@ -149,11 +151,27 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                 let server = server.clone();
                 let multi = multi.clone();
                 let delta_cache = delta_cache.clone();
+                let total_pg = total_pg.clone();
                 set.spawn(async move {
                     debug!("spawned thread for {}", &line);
                     let (_, filename) = line.rsplit_once('/').unwrap();
                     let filefut = async {
                     if let Some((oldname, oldpath)) = newest_cached(filename)? {
+                        // try to find the decompressed size for better progress monitoring
+                        use memmap2::Mmap;
+                        let orig = std::fs::File::open(oldpath)?;
+                        // i promise to not open the same file as writable at the same time
+                        let orig = unsafe { Mmap::map(&orig)?};
+                        // 16 megabytes seems like an ok average size
+                        // todo: find the actual average size of a decompressed package
+                        let default_size = 16*1024*1024;
+                        let dec_size = zstd::bulk::Decompressor::upper_bound(&orig)
+                            .unwrap_or_else(|| {
+                                debug!("using default size for {oldname}");
+                                default_size
+                            });
+                        total_pg.inc_length(dec_size.try_into().unwrap());
+
                         // delta download
                         let mut file_name = delta_cache.clone();
                         file_name.push(filename);
@@ -240,10 +258,13 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                             pg.finish_and_clear();
                             multi.remove(&pg);
                             tokio::task::spawn_blocking(move || -> Result<_,_> {
-                                apply_patch(&oldpath, &deltafile_name, &file_name, p_pg)
+                                let orig = Cursor::new(orig);
+                                let orig = zstd::decode_all(orig).unwrap();
+                                apply_patch(&orig, &deltafile_name, &file_name, p_pg)
                             })
                             .await??;
                         }
+                        total_pg.inc(dec_size.try_into().unwrap());
                     } else {
                         info!("no cached package found, leaving {} for pacman", filename);
                     }
@@ -279,7 +300,6 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                     error!("if the error is temporary, you can try running the command again");
 
                 }
-                total_pg.inc(1);
             }
         });
     Ok(())
@@ -328,7 +348,7 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
 }
 
 fn apply_patch(
-    orig: &Path,
+    orig: &[u8],
     patch: &Path,
     new: &Path,
     pb: ProgressBar,
@@ -345,8 +365,6 @@ fn apply_patch(
         new.file_name().unwrap().to_string_lossy()
     ));
 
-    let orig = OpenOptions::new().read(true).open(orig)?;
-    let orig = zstd::decode_all(orig)?;
     pb.set_length(orig.len().try_into().unwrap());
     let orig = Cursor::new(orig);
     let mut orig = pb.wrap_read(orig);
