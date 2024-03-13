@@ -40,11 +40,7 @@ fn main() {
             path.push(p.to_string());
             path
         };
-        async fn inner_f(
-            client: Client,
-            key: Package,
-            mut file: File,
-        ) -> Result<File, DownloadError> {
+        async fn inner_f(client: Client, key: Package, mut file: File) -> Result<File, DownloadError> {
             use tokio::io::AsyncWriteExt;
 
             let mut uri = String::new();
@@ -61,7 +57,10 @@ fn main() {
                 response = client.get(uri).send().await?;
             }
             if !response.status().is_success() {
-                return Err(DownloadError::Status{ status: response.status(), url: response.url().clone()})
+                return Err(DownloadError::Status {
+                    status: response.status(),
+                    url: response.url().clone(),
+                });
             }
 
             while let Some(mut chunk) = response.chunk().await? {
@@ -102,27 +101,26 @@ fn main() {
             let new = new.into_std().await;
             let mut new = zstd::Decoder::new(new)?;
 
-            let f: tokio::task::JoinHandle<Result<_, DeltaError>> =
-                tokio::task::spawn_blocking(move || {
-                    let mut zpatch = zstd::Encoder::new(patch, 22)?;
-                    let e = zpatch.set_parameter(zstd::zstd_safe::CParameter::NbWorkers(4));
-                    if let Err(e) = e {
-                        debug!("failed to make zstd multithread");
-                    }
-                    let mut last_report = 0;
-                    ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
-                        ddelta::State::Reading => debug!("reading"),
-                        ddelta::State::Sorting => debug!("sorting"),
-                        ddelta::State::Working(p) => {
-                            const MB: u64 = 1024 * 1024;
-                            if p > last_report + (8 * MB) {
-                                debug!("working: {}MB done", p / MB);
-                                last_report = p;
-                            }
+            let f: tokio::task::JoinHandle<Result<_, DeltaError>> = tokio::task::spawn_blocking(move || {
+                let mut zpatch = zstd::Encoder::new(patch, 22)?;
+                let e = zpatch.set_parameter(zstd::zstd_safe::CParameter::NbWorkers(4));
+                if let Err(e) = e {
+                    debug!("failed to make zstd multithread");
+                }
+                let mut last_report = 0;
+                ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
+                    ddelta::State::Reading => debug!("reading"),
+                    ddelta::State::Sorting => debug!("sorting"),
+                    ddelta::State::Working(p) => {
+                        const MB: u64 = 1024 * 1024;
+                        if p > last_report + (8 * MB) {
+                            debug!("working: {}MB done", p / MB);
+                            last_report = p;
                         }
-                    })?;
-                    Ok(zpatch.finish()?)
-                });
+                    }
+                })?;
+                Ok(zpatch.finish()?)
+            });
             let f = f.await.expect("threading error")?;
 
             let f = File::from_std(f);
@@ -156,8 +154,10 @@ enum DownloadError {
     #[error("http request failed: {0}")]
     Connection(#[from] reqwest::Error),
     #[error("bad status code: {status} while fetching {url}")]
-    Status{ url: reqwest::Url, status: reqwest::StatusCode},
-
+    Status {
+        url: reqwest::Url,
+        status: reqwest::StatusCode,
+    },
 }
 #[derive(Error, Debug)]
 enum DeltaError {
@@ -192,8 +192,7 @@ where
                 let f = s.get_or_generate(delta).await;
                 snd.send(f).expect("request was probably canceled");
             });
-            rcv.await
-                .expect("uncaught error in FileCache, thats a bug")??
+            rcv.await.expect("uncaught error in FileCache, thats a bug")??
         };
 
         let len = file.metadata().await?.len();
@@ -220,10 +219,7 @@ where
 }
 
 async fn root() -> (StatusCode, &'static str) {
-    (
-        StatusCode::OK,
-        "welcome to the inofficial archlinux delta server",
-    )
+    (StatusCode::OK, "welcome to the inofficial archlinux delta server")
 }
 
 async fn fallback() -> (StatusCode, &'static str) {
