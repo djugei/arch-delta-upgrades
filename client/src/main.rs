@@ -40,10 +40,10 @@ enum Commands {
     /// ```bash
     /// $ pacman -Sy
     ///
-    /// $ deltaclient http://bogen.moeh.re/arch path
+    /// $ deltaclient download http://bogen.moeh.re/arch path
     /// $ sudo cp path/*.pkg path/*.sig /var/cache/pacman/pkg/
     /// ## or
-    /// $ sudo deltaclient http://bogen.moeh.re/arch /var/cache/pacman/pkg/
+    /// $ sudo deltaclient download http://bogen.moeh.re/arch /var/cache/pacman/pkg/
     ///
     /// $ sudo pacman -Su
     /// ```
@@ -123,11 +123,13 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                 // try to find the decompressed size for better progress monitoring
                 use memmap2::Mmap;
                 let orig = std::fs::File::open(oldpath).expect("io error on local disk");
-                // i promise to not open the same file as writable at the same time
+                // safety: i promise to not open the same file as writable at the same time
                 let orig = unsafe { Mmap::map(&orig).expect("mmap failed") };
                 // 16 megabytes seems like an ok average size
                 // todo: find the actual average size of a decompressed package
                 let default_size = 16 * 1024 * 1024;
+                // due to pacman packages being compressed in streaming mode
+                // zstd does not have an exact decompressed size and heavily overestimates
                 let dec_size = zstd::bulk::Decompressor::upper_bound(&orig).unwrap_or_else(|| {
                     debug!("using default size for {oldname}");
                     default_size
@@ -155,14 +157,14 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
             let total_pg = ProgressBar::new(0)
                 .with_style(
                     ProgressStyle::with_template(
-                        "#### {msg} [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} eta: {eta} ####",
+                        "#### {msg} [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####",
                     )
                     .unwrap(),
                 )
                 .with_message("total progress:");
-            total_pg.enable_steady_tick(Duration::from_millis(100));
             let total_pg = multi.add(total_pg);
             total_pg.tick();
+            total_pg.enable_steady_tick(Duration::from_millis(100));
 
             let mut set = JoinSet::new();
             for (line, oldname, orig, mut dec_size) in lines {
@@ -182,8 +184,15 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                         // delta download
                         let mut file_name = delta_cache.clone();
                         file_name.push(filename);
+
+                        let delta = parsing::Delta::try_from((
+                            Package::try_from(oldname.as_str())?,
+                            Package::try_from(filename)?,
+                        ))?;
+                        let mut delta = delta.to_string();
+                        delta.push_str(".delta");
                         let mut deltafile_name = file_name.clone();
-                        deltafile_name.as_mut_os_string().push(".delta");
+                        deltafile_name.set_file_name(delta);
 
                         let mut deltafile = tokio::fs::File::create(deltafile_name.clone()).await?;
 
@@ -270,6 +279,7 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                         dec_size -= dec_size / 2;
 
                         {
+                            let file_name = file_name.clone();
                             let p_pg = ProgressBar::new(0);
                             let p_pg = multi.insert_after(&pg, p_pg);
                             pg.finish_and_clear();
@@ -387,6 +397,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> Result
         // otherwise the internal buffer of stdin/out is full and it deadlocks
         let mut new_f = OpenOptions::new().write(true).create(true).open(new)?;
         let handle = std::thread::spawn(move || -> std::io::Result<()> {
+            // fixme: maybe this is why the zstd process stays around as zombie?
             std::io::copy(&mut z.stdout.unwrap(), &mut new_f)?;
             Ok(())
         });
