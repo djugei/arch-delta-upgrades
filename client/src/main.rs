@@ -291,8 +291,12 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                             })
                             .await??;
                         }
+                        use std::os::unix::fs::MetadataExt;
+                        let deltasize = deltafile.metadata().await?.size();
+                        let newsize = tokio::fs::File::open(&file_name).await?.metadata().await?.size();
+
                         total_pg.inc(dec_size);
-                        Ok::<(), anyhow::Error>(())
+                        Ok::<_, anyhow::Error>((deltasize, newsize))
                     };
 
                     let sigfut = async {
@@ -312,18 +316,33 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                     };
 
                     let (f, s) = tokio::join!(filefut, sigfut);
-                    f.context("creating delat file failed")?;
+                    let f = f.context("creating delta file failed")?;
                     s.context("creating signature file failed")?;
-                    Ok::<(), anyhow::Error>(())
+                    Ok::<_, anyhow::Error>(f)
                 });
             }
 
+            let mut deltasize = 0;
+            let mut newsize = 0;
             while let Some(res) = set.join_next().await {
-                if let Err(e) = res {
-                    error!("{}", e);
-                    error!("if the error is temporary, you can try running the command again");
+                match res.unwrap() {
+                    Err(e) => {
+                        error!("{}", e);
+                        error!("if the error is temporary, you can try running the command again");
+                    }
+                    Ok((d, n)) => {
+                        deltasize += d;
+                        newsize += n;
+                    }
                 }
             }
+            static MB: u64 = 1024 * 1024;
+            deltasize /= MB;
+            newsize /= MB;
+            let saved = newsize - deltasize;
+            info!("downloaded   {deltasize}MB");
+            info!("upgrades are {newsize}MB");
+            info!("saved you    {saved}MB");
         });
     Ok(())
 }
