@@ -7,7 +7,7 @@ use axum::{
 };
 use core::future::Future;
 use log::{debug, error, info};
-use std::{path::PathBuf, sync::Arc};
+use std::{panic, path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::fs::File;
 
@@ -187,12 +187,15 @@ where
 
         let file = {
             let delta = delta.clone();
-            let (snd, rcv) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let f = s.get_or_generate(delta).await;
-                snd.send(f).expect("request was probably canceled");
-            });
-            rcv.await.expect("uncaught error in FileCache, thats a bug")??
+            // spawning is done here so the generation continues even if the original request times out or is cancled
+            match tokio::spawn(async move { s.get_or_generate(delta).await })
+                .await
+                .map_err(|e| e.try_into_panic())
+            {
+                Err(Ok(p)) => panic::resume_unwind(p),
+                Err(Err(_)) => unreachable!("this task does not get cancled"),
+                Ok(r) => r??,
+            }
         };
 
         let len = file.metadata().await?.len();
