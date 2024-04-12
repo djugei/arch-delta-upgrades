@@ -11,7 +11,7 @@ use anyhow::Context;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use parsing::Package;
 use reqwest::{StatusCode, Url};
 use tokio::{
@@ -52,7 +52,11 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Download { server: Url, delta_cache: PathBuf },
     /// run an entire upgrade, calling pacman interally, needs sudo to run.
-    Upgrade { server: Url },
+    Upgrade {
+        server: Url,
+        #[arg(default_values_t = [Box::<str>::from("linux")])]
+        blacklist: Vec<Box<str>>,
+    },
 }
 
 fn main() {
@@ -77,7 +81,7 @@ fn main() {
             let orig = zstd::decode_all(orig).unwrap();
             apply_patch(&orig, &patch, &new, pb).unwrap();
         }
-        Commands::Upgrade { server } => {
+        Commands::Upgrade { server, blacklist } => {
             info!("running pacman -Sy");
             let exit = Command::new("pacman")
                 .arg("-Sy")
@@ -90,7 +94,7 @@ fn main() {
             }
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-            upgrade(server, cachepath, multi).unwrap();
+            let (mut deltasize, mut newsize) = upgrade(server, blacklist, cachepath, multi).unwrap();
 
             info!("running pacman -Su to install updates");
             let exit = Command::new("pacman")
@@ -99,18 +103,34 @@ fn main() {
                 .expect("could not run pacman -Su")
                 .wait()
                 .expect("error waiting for pacman -Su");
+
+            static MB: u64 = 1024 * 1024;
+            deltasize /= MB;
+            newsize /= MB;
+            let saved = newsize - deltasize;
+            info!("downloaded   {deltasize}MB");
+            info!("upgrades are {newsize}MB");
+            info!("saved you    {saved}MB");
+
             if !exit.success() {
                 panic!("pacman -Su failed, aborting. Fix errors and try again");
             }
+
+            info!("have a great day!");
         }
         Commands::Download { server, delta_cache } => {
             std::fs::create_dir_all(&delta_cache).unwrap();
-            upgrade(server, delta_cache, multi).unwrap()
+            upgrade(server, vec![], delta_cache, multi).unwrap();
         }
     }
 }
 
-fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::Result<()> {
+fn upgrade(
+    server: Url,
+    blacklist: Vec<Box<str>>,
+    delta_cache: PathBuf,
+    multi: MultiProgress,
+) -> anyhow::Result<(u64, u64)> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let mut lines: Vec<_> = upgrades
         .lines()
@@ -119,6 +139,14 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
         .inspect(|l| debug!("{}", l))
         .filter_map(|line| {
             let (_, filename) = line.rsplit_once('/').unwrap();
+            let (name_ver, _arch) = filename.rsplit_once('-').unwrap();
+            let (name, _ver) = name_ver.rsplit_once('-').unwrap();
+            if blacklist.iter().any(|e| **e == *name) {
+                info!("{name} is blacklisted, skipping");
+                return None;
+            } else {
+                trace!("{name} is not blacklisted, continuing");
+            }
             if let Some((oldname, oldpath)) = newest_cached(filename).expect("io error on local disk") {
                 // try to find the decompressed size for better progress monitoring
                 use memmap2::Mmap;
@@ -336,15 +364,8 @@ fn upgrade(server: Url, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::R
                     }
                 }
             }
-            static MB: u64 = 1024 * 1024;
-            deltasize /= MB;
-            newsize /= MB;
-            let saved = newsize - deltasize;
-            info!("downloaded   {deltasize}MB");
-            info!("upgrades are {newsize}MB");
-            info!("saved you    {saved}MB");
-        });
-    Ok(())
+            Ok((deltasize, newsize))
+        })
 }
 
 /// returns the newest package in /var/cache/pacman/pkg that
