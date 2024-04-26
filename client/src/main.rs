@@ -11,7 +11,7 @@ use anyhow::Context;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{debug, error, info, trace};
+use log::{debug, error, info};
 use parsing::Package;
 use reqwest::{StatusCode, Url};
 use tokio::{
@@ -139,13 +139,13 @@ fn upgrade(
         .inspect(|l| debug!("{}", l))
         .filter_map(|line| {
             let (_, filename) = line.rsplit_once('/').unwrap();
-            let (name_ver, _arch) = filename.rsplit_once('-').unwrap();
-            let (name, _ver) = name_ver.rsplit_once('-').unwrap();
+            let pkg = Package::try_from(filename).unwrap();
+            let name = pkg.get_name();
             if blacklist.iter().any(|e| **e == *name) {
                 info!("{name} is blacklisted, skipping");
                 return None;
             } else {
-                trace!("{name} is not blacklisted, continuing");
+                debug!("{name} is not blacklisted, continuing");
             }
             if let Some((oldname, oldpath)) = newest_cached(filename).expect("io error on local disk") {
                 // try to find the decompressed size for better progress monitoring
