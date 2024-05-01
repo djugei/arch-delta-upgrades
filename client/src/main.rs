@@ -1,3 +1,12 @@
+mod util;
+
+use anyhow::Context;
+use bytesize::ByteSize;
+use clap::Parser;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use log::{debug, error, info};
+use parsing::Package;
+use reqwest::Url;
 use std::{
     fs::OpenOptions,
     io::{BufRead, Cursor},
@@ -6,18 +15,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-
-use anyhow::Context;
-
-use clap::Parser;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{debug, error, info};
-use parsing::Package;
-use reqwest::{StatusCode, Url};
-use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
-    task::JoinSet,
-};
+use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -94,7 +92,13 @@ fn main() {
             }
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-            let (mut deltasize, mut newsize) = upgrade(server, blacklist, cachepath, multi).unwrap();
+            let (deltasize, newsize) = match upgrade(server, blacklist, cachepath, multi) {
+                Ok((d, n)) => (d, n),
+                Err(e) => {
+                    error!("{e}");
+                    panic!("{e}")
+                }
+            };
 
             info!("running pacman -Su to install updates");
             let exit = Command::new("pacman")
@@ -104,13 +108,14 @@ fn main() {
                 .wait()
                 .expect("error waiting for pacman -Su");
 
-            static MB: u64 = 1024 * 1024;
-            deltasize /= MB;
-            newsize /= MB;
             let saved = newsize - deltasize;
-            info!("downloaded   {deltasize}MB");
-            info!("upgrades are {newsize}MB");
-            info!("saved you    {saved}MB");
+
+            let deltasize = ByteSize::b(deltasize);
+            let newsize = ByteSize::b(newsize);
+            let saved = ByteSize::b(saved);
+            info!("downloaded   {deltasize}");
+            info!("upgrades are {newsize}");
+            info!("saved you    {saved}");
 
             if !exit.success() {
                 panic!("pacman -Su failed, aborting. Fix errors and try again");
@@ -169,7 +174,7 @@ fn upgrade(
             }
         })
         .collect();
-    lines.sort_unstable_by_key(|(_, _, _, s)| std::cmp::Reverse(*s));
+    lines.sort_unstable_by_key(|(_, _, _, size)| std::cmp::Reverse(*size));
 
     info!("downloading {} updates", lines.len());
 
@@ -180,6 +185,7 @@ fn upgrade(
         .block_on(async {
             let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
             let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
+            let maxpar_inflight = std::sync::Arc::new(tokio::sync::Semaphore::new(20));
             let client = reqwest::Client::new();
 
             let total_pg = ProgressBar::new(0)
@@ -199,6 +205,7 @@ fn upgrade(
                 let client = client.clone();
                 let maxpar = maxpar.clone();
                 let maxpar_req = maxpar_req.clone();
+                let maxpar_inflight = maxpar_inflight.clone();
                 let server = server.clone();
                 let multi = multi.clone();
                 let delta_cache = delta_cache.clone();
@@ -213,10 +220,10 @@ fn upgrade(
                         let mut file_name = delta_cache.clone();
                         file_name.push(filename);
 
-                        let delta = parsing::Delta::try_from((
-                            Package::try_from(oldname.as_str())?,
-                            Package::try_from(filename)?,
-                        ))?;
+                        let oldpkg = Package::try_from(oldname.as_str())?;
+                        let newpkg = Package::try_from(filename)?;
+                        let delta = parsing::Delta::try_from((oldpkg, newpkg.clone()))?;
+
                         let mut delta = delta.to_string();
                         delta.push_str(".delta");
                         let mut deltafile_name = file_name.clone();
@@ -224,80 +231,20 @@ fn upgrade(
 
                         let mut deltafile = tokio::fs::File::create(deltafile_name.clone()).await?;
 
-                        let style = ProgressStyle::with_template(
-                            "{prefix}{msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}",
+                        let url = format!("{server}/{oldname}/{filename}");
+
+                        let inflight_guard = maxpar_inflight.acquire().await;
+                        let pg = util::do_download(
+                            multi.clone(),
+                            &newpkg,
+                            client.clone(),
+                            maxpar_req,
+                            maxpar,
+                            url,
+                            &mut deltafile,
                         )
-                        .unwrap()
-                        .progress_chars("█▇▆▅▄▃▂▁  ");
+                        .await?;
 
-                        let guard = maxpar_req.acquire().await;
-                        let pg = ProgressBar::new(0)
-                            .with_style(style)
-                            .with_prefix(format!("deltadownload {}", filename))
-                            .with_message(": waiting for server, this may take up to a few minutes");
-                        let pg = multi.add(pg);
-                        pg.tick();
-
-                        let mut url: String = server.into();
-                        url.push('/');
-                        url.push_str(&oldname);
-                        url.push('/');
-                        url.push_str(filename);
-                        let mut delta = {
-                            loop {
-                                // catch both client and server timeouts and simply retry
-                                match client.get(&url).send().await {
-                                    Ok(d) => match d.status() {
-                                        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
-                                            debug!("timeout; retrying {}", url)
-                                        }
-                                        status if !status.is_success() => panic!("request failed with {}", status),
-                                        _ => break d,
-                                    },
-                                    Err(e) => {
-                                        if !e.is_timeout() {
-                                            panic!("{}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        };
-                        std::mem::drop(guard);
-                        pg.set_length(delta.content_length().unwrap_or(0));
-                        pg.set_message("");
-                        pg.tick();
-                        total_pg.inc(dec_size / 3);
-                        dec_size -= dec_size / 3;
-
-                        // acquire guard after sending request but before using the body
-                        // so the deltas can get generated on the server as parallel as possible
-                        // but the download does not get fragmented/overwhelmed
-                        let guard = maxpar.acquire().await;
-                        let mut tries = 0;
-                        'retry: loop {
-                            loop {
-                                match delta.chunk().await {
-                                    Ok(Some(chunk)) => {
-                                        let len = chunk.len();
-                                        deltafile.write_all(&chunk).await?;
-                                        pg.inc(len.try_into().unwrap());
-                                    }
-                                    Ok(None) => break 'retry,
-                                    Err(e) => {
-                                        if tries < 3 {
-                                            deltafile.seek(std::io::SeekFrom::Start(0)).await?;
-                                            pg.set_position(0);
-                                            debug!("download failed {tries}/3");
-                                            tries += 1;
-                                            continue 'retry;
-                                        } else {
-                                            anyhow::bail!(e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        drop(guard);
                         info!(
                             "downloaded {} in {} seconds",
                             deltafile_name.display(),
@@ -324,6 +271,7 @@ fn upgrade(
                         let newsize = tokio::fs::File::open(&file_name).await?.metadata().await?.size();
 
                         total_pg.inc(dec_size);
+                        drop(inflight_guard);
                         Ok::<_, anyhow::Error>((deltasize, newsize))
                     };
 
@@ -336,7 +284,7 @@ fn upgrade(
                         let mut sigline = line.to_owned();
                         sigline.push_str(".sig");
                         debug!("getting signature from {}", sigline);
-                        let mut res = client.get(&sigline).send().await?;
+                        let mut res = client.get(&sigline).send().await?.error_for_status()?;
                         while let Some(chunk) = res.chunk().await? {
                             sigfile.write_all(&chunk).await?
                         }
@@ -352,11 +300,13 @@ fn upgrade(
 
             let mut deltasize = 0;
             let mut newsize = 0;
+            let mut lasterror = None;
             while let Some(res) = set.join_next().await {
                 match res.unwrap() {
                     Err(e) => {
                         error!("{}", e);
                         error!("if the error is temporary, you can try running the command again");
+                        lasterror = Some(e);
                     }
                     Ok((d, n)) => {
                         deltasize += d;
@@ -364,8 +314,21 @@ fn upgrade(
                     }
                 }
             }
-            Ok((deltasize, newsize))
+            lasterror.ok_or((deltasize, newsize)).swap()
         })
+}
+
+trait ResultSwap<T, E> {
+    fn swap(self: Self) -> Result<E, T>;
+}
+
+impl<T, E> ResultSwap<T, E> for Result<T, E> {
+    fn swap(self: Self) -> Result<E, T> {
+        match self {
+            Ok(t) => Err(t),
+            Err(e) => Ok(e),
+        }
+    }
 }
 
 /// returns the newest package in /var/cache/pacman/pkg that
