@@ -15,8 +15,8 @@ use async_file_cache::FileCache;
 
 use parsing::{Delta, Package};
 
-const MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
-const FALLBACK_MIRROR: &str = "http://mirror.f4st.host/archlinux/pool/packages/";
+const MIRROR: &str = "http://mirror.f4st.host/archlinux/pool/packages/";
+const FALLBACK_MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
 const LOCAL: &str = "./deltaserver/";
 
 type Str = Box<str>;
@@ -49,7 +49,7 @@ fn main() {
             let mut response = client.get(uri).send().await?;
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
-                // fall back to live mirror
+                // fall back to archive mirror
                 info!("using fallback mirror for {key}");
                 let mut uri = String::new();
                 uri.push_str(FALLBACK_MIRROR);
