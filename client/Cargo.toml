@@ -21,6 +21,8 @@ indicatif-log-bridge = "*"
 anyhow = "*"
 memmap2 = "*"
 bytesize = "1.3.0"
+strsim = "0.11"
+dialoguer = "*"
 
 [[bin]]
 name = "deltaclient"

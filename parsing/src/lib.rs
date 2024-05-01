@@ -2,7 +2,7 @@ use thiserror::Error;
 
 type Str = Box<str>;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+#[derive(Debug, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct Package {
     name: Str,
     version: Str,
@@ -16,6 +16,24 @@ impl Package {
     }
     pub fn get_version(&self) -> &str {
         &self.version
+    }
+    // name, version, arch, trailer
+    pub fn destructure(self) -> (Str, Str, Str, Str) {
+        (self.name, self.version, self.arch, self.trailer)
+    }
+    pub fn from_parts((name, version, arch, trailer): (Str, Str, Str, Str)) -> Self {
+        Self {
+            name,
+            version,
+            arch,
+            trailer,
+        }
+    }
+}
+
+impl PartialEq for Package {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.version == other.version && self.arch == other.arch
     }
 }
 
@@ -39,9 +57,7 @@ impl<'s> TryFrom<&'s str> for Package {
         if value.contains('/') {
             return Err(PackageParseError::Invalid);
         }
-        let (left, trailer) = value
-            .rsplit_once('-')
-            .ok_or("name, version | arch trailer")?;
+        let (left, trailer) = value.rsplit_once('-').ok_or("name, version | arch trailer")?;
         let mut idx = left.rmatch_indices('-');
         let _ = idx.next();
         let (idx, _) = idx.next().ok_or("name | version")?;
@@ -60,11 +76,7 @@ impl<'s> TryFrom<&'s str> for Package {
 
 impl std::fmt::Display for Package {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}-{}-{}.{}",
-            self.name, self.version, self.arch, self.trailer
-        )
+        write!(f, "{}-{}-{}.{}", self.name, self.version, self.arch, self.trailer)
     }
 }
 
