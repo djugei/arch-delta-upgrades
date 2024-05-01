@@ -5,20 +5,18 @@ use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info};
-use parsing::Package;
 use reqwest::Url;
 use std::{
-    collections::HashMap,
     fs::OpenOptions,
-    io::{BufRead, Cursor},
+    io::{Cursor, ErrorKind},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
     time::Duration,
 };
-use tokio::task::JoinSet;
+use tokio::{io::AsyncWriteExt, task::JoinSet};
 
-static PACMAN_CACHE: &str = "/var/cache/pacman/pkg/";
+type Str = Box<str>;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -133,73 +131,18 @@ fn main() {
     }
 }
 
-fn upgrade(
-    server: Url,
-    blacklist: Vec<Box<str>>,
-    delta_cache: PathBuf,
-    multi: MultiProgress,
-) -> anyhow::Result<(u64, u64)> {
-    let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
-    let mut packageversions = build_package_versions().expect("io error on local disk");
-    let mut lines: Vec<_> = upgrades
-        .lines()
-        .map(|l| l.expect("pacman abborted output???"))
-        .filter(|l| !l.starts_with("file"))
-        .filter_map(|line| {
-            let (_, filename) = line.rsplit_once('/').unwrap();
-            let pkg = Package::try_from(filename).unwrap();
-            let name = pkg.get_name();
-            if blacklist.iter().any(|e| **e == *name) {
-                info!("{name} is blacklisted, skipping");
-                return None;
-            }
-            if let Some((oldpkg, oldpath)) = newest_cached(&packageversions, &pkg.get_name()).or_else(|| {
-                let (alternative, _) = packageversions
-                    .keys()
-                    .map(|name| (name, strsim::levenshtein(name, pkg.get_name())))
-                    .filter(|(_name, sim)| sim <= &2)
-                    .min()?;
-                let prompt =
-                    format!("could not find cached package for {name}, {alternative} is similar, use that instead?");
-                if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
-                    newest_cached(&mut packageversions, &"lol")
-                } else {
-                    None
-                }
-            }) {
-                // try to find the decompressed size for better progress monitoring
-                use memmap2::Mmap;
-                let oldfile = std::fs::File::open(oldpath).expect("io error on local disk");
-                // safety: i promise to not open the same file as writable at the same time
-                let oldfile = unsafe { Mmap::map(&oldfile).expect("mmap failed") };
-                // 16 megabytes seems like an ok average size
-                // todo: find the actual average size of a decompressed package
-                let default_size = 16 * 1024 * 1024;
-                // due to pacman packages being compressed in streaming mode
-                // zstd does not have an exact decompressed size and heavily overestimates
-                let dec_size = zstd::bulk::Decompressor::upper_bound(&oldfile).unwrap_or_else(|| {
-                    debug!("using default size for {name}");
-                    default_size
-                });
-                Some((pkg, oldpkg, oldfile, (dec_size as u64)))
-            } else {
-                info!("no cached package found, leaving {} for pacman", filename);
-                None
-            }
-        })
-        .collect();
-    lines.sort_unstable_by_key(|(_, _, _, size)| std::cmp::Reverse(*size));
-
-    info!("downloading {} updates", lines.len());
+fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::Result<(u64, u64)> {
+    let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
+    info!("downloading {} updates", upgrade_candidates.len());
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("could not build async runtime")
         .block_on(async {
-            let maxpar = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
             let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
-            let maxpar_inflight = std::sync::Arc::new(tokio::sync::Semaphore::new(20));
+            let maxpar_dl = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let maxpar_cpu = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
             let client = reqwest::Client::new();
 
             let total_pg = ProgressBar::new(0)
@@ -215,15 +158,18 @@ fn upgrade(
             total_pg.enable_steady_tick(Duration::from_millis(100));
 
             let mut set = JoinSet::new();
-            for (newpkg, oldpkg, oldfile, mut dec_size) in lines {
-                let client = client.clone();
-                let maxpar = maxpar.clone();
-                let maxpar_req = maxpar_req.clone();
-                let maxpar_inflight = maxpar_inflight.clone();
-                let server = server.clone();
+            for (url, newpkg, oldpkg, oldfile, mut dec_size) in upgrade_candidates {
                 let multi = multi.clone();
-                let delta_cache = delta_cache.clone();
                 let total_pg = total_pg.clone();
+
+                let maxpar_req = maxpar_req.clone();
+                let maxpar_dl = maxpar_dl.clone();
+                let maxpar_cpu = maxpar_cpu.clone();
+
+                let client = client.clone();
+                let delta_cache = delta_cache.clone();
+                let server = server.clone();
+
                 set.spawn(async move {
                     debug!("spawned task for {}", newpkg.get_name());
                     let filefut = async {
@@ -234,24 +180,19 @@ fn upgrade(
                         file_name.push(format!("{newpkg}"));
 
                         let delta = parsing::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
-
-                        let mut delta = delta.to_string();
-                        delta.push_str(".delta");
-                        let mut deltafile_name = file_name.clone();
-                        deltafile_name.set_file_name(delta);
+                        let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
 
                         let mut deltafile = tokio::fs::File::create(deltafile_name.clone()).await?;
 
                         let url = format!("{server}/{oldpkg}/{newpkg}");
 
-                        let inflight_guard = maxpar_inflight.acquire().await;
                         let pg = util::do_download(
                             multi.clone(),
                             &newpkg,
                             client.clone(),
                             maxpar_req,
-                            maxpar,
-                            url,
+                            maxpar_dl,
+                            url.clone(),
                             &mut deltafile,
                         )
                         .await?;
@@ -270,37 +211,39 @@ fn upgrade(
                             let p_pg = multi.insert_after(&pg, p_pg);
                             pg.finish_and_clear();
                             multi.remove(&pg);
+                            let guard_cpu = maxpar_cpu.acquire_owned().await;
                             tokio::task::spawn_blocking(move || -> Result<_, _> {
                                 let oldfile = Cursor::new(oldfile);
                                 let oldfile = zstd::decode_all(oldfile).unwrap();
                                 apply_patch(&oldfile, &deltafile_name, &file_name, p_pg)
                             })
                             .await??;
+                            drop(guard_cpu);
                         }
                         use std::os::unix::fs::MetadataExt;
                         let deltasize = deltafile.metadata().await?.size();
                         let newsize = tokio::fs::File::open(&file_name).await?.metadata().await?.size();
 
                         total_pg.inc(dec_size);
-                        drop(inflight_guard);
                         Ok::<_, anyhow::Error>((deltasize, newsize))
                     };
 
                     let sigfut = async {
-                        /*
                         let mut sigfile = delta_cache.clone();
-                        sigfile.push(format!("{newpkg}"));
-                        sigfile.as_mut_os_string().push(".sig");
-                        let mut sigfile = tokio::fs::File::create(sigfile).await?;
+                        sigfile.push(format!("{newpkg}.sig"));
+                        let mut sigfile = match tokio::fs::OpenOptions::new().create_new(true).open(sigfile).await {
+                            // the sigfile already exists, probably from a previous run, do nothing
+                            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+                            Err(e) => return Err(anyhow::Error::from(e)),
+                            Ok(f) => f,
+                        };
 
-                        let mut sigline = line.to_owned();
-                        sigline.push_str(".sig");
-                        debug!("getting signature from {}", sigline);
-                        let mut res = client.get(&sigline).send().await?.error_for_status()?;
+                        let sigurl = format!("{url}.sig");
+                        debug!("getting signature from {}", url);
+                        let mut res = client.get(&sigurl).send().await?.error_for_status()?;
                         while let Some(chunk) = res.chunk().await? {
                             sigfile.write_all(&chunk).await?
                         }
-                        */
                         Ok::<(), anyhow::Error>(())
                     };
 
@@ -342,57 +285,6 @@ impl<T, E> ResultSwap<T, E> for Result<T, E> {
             Err(e) => Ok(e),
         }
     }
-}
-
-type Str = Box<str>;
-type PackageVersions = HashMap<Str, Vec<(Str, Str, Str, PathBuf)>>;
-
-/// {package -> [(version, arch, trailer, path)]}
-fn build_package_versions() -> std::io::Result<PackageVersions> {
-    let mut package_versions: PackageVersions = HashMap::new();
-    for line in std::fs::read_dir(PACMAN_CACHE)? {
-        let line = line?;
-        if !line.file_type()?.is_file() {
-            continue;
-        }
-        let filename = line.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.ends_with(".zst") {
-            continue;
-        }
-        let path = line.path().into();
-        let package = Package::try_from(&*filename).expect("non-pkg zstd file in pacman cache dir?");
-        let (name, version, arch, trailer) = package.destructure();
-
-        match package_versions.entry(name) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().push((version, arch, trailer, path));
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(vec![(version, arch, trailer, path)]);
-            }
-        }
-    }
-    package_versions.shrink_to_fit();
-
-    for e in package_versions.values_mut() {
-        e.sort()
-    }
-
-    Ok(package_versions)
-}
-
-/// returns the newest package in /var/cache/pacman/pkg that
-/// fits the passed package
-fn newest_cached(pv: &PackageVersions, package_name: &str) -> Option<(Package, PathBuf)> {
-    pv.get(package_name)
-        .map(|e| e.last().expect("each entry has at least one version"))
-        .map(|(version, arch, trailer, path)| {
-            (
-                Package::from_parts((package_name.into(), version.clone(), arch.clone(), trailer.clone())),
-                path.clone(),
-            )
-        })
 }
 
 #[cfg(feature = "diff")]
