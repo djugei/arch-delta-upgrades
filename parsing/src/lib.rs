@@ -123,8 +123,6 @@ impl Delta {
 
 #[derive(Error, Debug)]
 pub enum DeltaError {
-    #[error("unequal package")]
-    Package,
     #[error("equal version")]
     Version,
 }
@@ -132,10 +130,7 @@ impl TryFrom<(Package, Package)> for Delta {
     type Error = DeltaError;
 
     fn try_from((p1, p2): (Package, Package)) -> Result<Self, Self::Error> {
-        #[allow(clippy::if_same_then_else)]
-        if (&p1.name, &p1.arch, &p1.trailer) != (&p2.name, &p2.arch, &p2.trailer) {
-            Err(DeltaError::Package)
-        } else if p1.version == p2.version {
+        if p1.version == p2.version {
             Err(DeltaError::Version)
         } else {
             Ok(Delta {

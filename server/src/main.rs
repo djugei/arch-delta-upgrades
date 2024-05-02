@@ -1,4 +1,5 @@
 #![allow(dead_code, unreachable_code, unused_variables)]
+use anyhow::bail;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -159,6 +160,7 @@ enum DownloadError {
         status: reqwest::StatusCode,
     },
 }
+
 #[derive(Error, Debug)]
 enum DeltaError {
     #[error("could not download file: {0}")]
@@ -183,6 +185,9 @@ where
     let c = || async {
         let from = Package::try_from(&*from)?;
         let to = Package::try_from(&*to)?;
+        if strsim::levenshtein(from.get_name(), to.get_name()) > 3 {
+            bail!("packages are too different")
+        }
         let delta: Delta = (from, to).try_into()?;
 
         let file = {

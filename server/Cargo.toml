@@ -20,4 +20,4 @@ parsing = {path = "../parsing"}
 thiserror = "*"
 anyhow = "*"
 async_file_cache = {path = "../async_file_cache"}
-
+strsim = "*"
