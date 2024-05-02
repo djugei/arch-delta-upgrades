@@ -231,7 +231,12 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                     let sigfut = async {
                         let mut sigfile = delta_cache.clone();
                         sigfile.push(format!("{newpkg}.sig"));
-                        let mut sigfile = match tokio::fs::OpenOptions::new().create_new(true).open(sigfile).await {
+                        let mut sigfile = match tokio::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(sigfile)
+                            .await
+                        {
                             // the sigfile already exists, probably from a previous run, do nothing
                             Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
                             Err(e) => return Err(anyhow::Error::from(e)),
@@ -260,7 +265,7 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
             while let Some(res) = set.join_next().await {
                 match res.unwrap() {
                     Err(e) => {
-                        error!("{}", e);
+                        error!("{:?}", e);
                         error!("if the error is temporary, you can try running the command again");
                         lasterror = Some(e);
                     }
