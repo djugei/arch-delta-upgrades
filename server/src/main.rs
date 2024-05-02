@@ -165,8 +165,8 @@ enum DeltaError {
     Download(#[from] DownloadError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("other: {0}")]
-    Other(#[from] anyhow::Error),
+    #[error("generation error: {0}")]
+    DeltaGen(#[from] ddelta::DiffError),
 }
 use axum::body::Body;
 use axum::http::HeaderName;
