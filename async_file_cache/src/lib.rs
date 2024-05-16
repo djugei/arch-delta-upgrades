@@ -1,7 +1,7 @@
 use core::future::Future;
-use log::{debug, trace};
 use std::ffi::OsString;
 use std::{collections::HashMap, hash::Hash, io::ErrorKind, path::PathBuf, pin::pin};
+use tracing::{debug, trace};
 
 use tokio::io::AsyncSeekExt;
 use tokio::{fs::File, sync::Mutex, sync::Semaphore};
