@@ -10,3 +10,8 @@ opt-level = 3
 
 [profile.release]
 lto="fat"
+debug=1
+
+[patch.crates-io]
+ddelta = { git = "https://github.com/djugei/ddelta-rs" }
+indicatif = { git = "https://github.com/djugei/indicatif" }
