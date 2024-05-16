@@ -147,14 +147,10 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
             let maxpar_cpu = std::sync::Arc::new(tokio::sync::Semaphore::new(parallel));
             let client = reqwest::Client::new();
 
-            let total_pg = ProgressBar::new(0)
-                .with_style(
-                    ProgressStyle::with_template(
-                        "#### {msg} [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####",
-                    )
+            let total_pg = ProgressBar::new(0).with_style(
+                ProgressStyle::with_template("#### total: [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####")
                     .unwrap(),
-                )
-                .with_message("total progress:");
+            );
             let total_pg = multi.add(total_pg);
             total_pg.tick();
             total_pg.enable_steady_tick(Duration::from_millis(100));
@@ -311,12 +307,9 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
 }
 
 fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> Result<(), std::io::Error> {
-    let style = ProgressStyle::with_template("{prefix} {wide_bar} {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}")
-        .unwrap()
-        .progress_chars("█▇▆▅▄▃▂▁  ");
-
-    pb.set_style(style);
-    pb.set_prefix(format!("patching {}", new.file_name().unwrap().to_string_lossy()));
+    pb.set_style(util::progress_style());
+    pb.set_prefix("patching");
+    pb.set_message(new.file_name().unwrap().to_string_lossy().into_owned());
 
     pb.set_length(orig.len().try_into().unwrap());
     let orig = Cursor::new(orig);

@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::BufRead, path::PathBuf, process::Command};
 use anyhow::bail;
 use http::StatusCode;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{debug, info, trace};
+use log::{debug, info};
 use memmap2::Mmap;
 use parsing::Package;
 use reqwest::Client;
@@ -18,6 +18,12 @@ type PackageVersions = HashMap<Str, Vec<(Str, Str, Str, PathBuf)>>;
 
 static PACMAN_CACHE: &str = "/var/cache/pacman/pkg/";
 
+pub(crate) fn progress_style() -> ProgressStyle {
+    ProgressStyle::with_template("{prefix} {msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}")
+        .unwrap()
+        .progress_chars("█▇▆▅▄▃▂▁  ")
+}
+
 pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<Semaphore>>(
     multi: MultiProgress,
     pkg: &Package,
@@ -27,23 +33,17 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
     url: String,
     target: W,
 ) -> Result<ProgressBar, anyhow::Error> {
-    let style =
-        ProgressStyle::with_template("{prefix}{msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}")
-            .unwrap()
-            .progress_chars("█▇▆▅▄▃▂▁  ");
     let pg = ProgressBar::hidden()
-        .with_prefix(format!("deltadownload {}-{}", pkg.get_name(), pkg.get_version()))
-        .with_style(style)
-        .with_message(": waiting for server, this may take up to a few minutes");
+        .with_prefix("server generates")
+        .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
+        .with_style(progress_style());
 
     let pg = multi.add(pg);
-    pg.tick();
     pin!(target);
     let mut tries = 3;
     'retry: loop {
-        trace!("acquiring request guard");
         let guard = request_guard.as_ref().acquire().await?;
-        trace!("acquired request guard");
+        pg.tick();
         pg.set_position(0);
         let mut delta = {
             loop {
@@ -65,11 +65,10 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
             }
         };
         std::mem::drop(guard);
-        trace!("dropped request guard");
 
         pg.reset_elapsed();
         pg.set_length(delta.content_length().unwrap_or(0));
-        pg.set_message("");
+        pg.set_prefix("downloading");
         pg.tick();
 
         // acquire guard after sending request but before using the body
