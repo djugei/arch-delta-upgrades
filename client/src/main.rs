@@ -1,6 +1,6 @@
 mod util;
 
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -309,7 +309,7 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
     Ok(())
 }
 
-fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> Result<(), std::io::Error> {
+fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow::Result<()> {
     pb.set_style(util::progress_style());
     pb.set_prefix("patching");
     pb.set_message(new.file_name().unwrap().to_string_lossy().into_owned());
@@ -327,21 +327,29 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> Result
     // can try to set parallelity in zstd lib?
     // cat patched.tar | zstd -c -T0 --ultra -20 > patched.tar.zstd
     {
-        let z = Command::new("zstd")
-            .args(["-c", "-T0", "--ultra", "-20"])
+        let mut z = Command::new("zstd")
+            .args(["-c", "-T0", "--ultra", "-20", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
+
+        let mut stdin = z.stdin.take().unwrap();
+        let mut stdout = z.stdout.take().unwrap();
 
         // gotta drain stdout into file while at the same time writing into stdin
         // otherwise the internal buffer of stdin/out is full and it deadlocks
         let mut new_f = OpenOptions::new().write(true).create(true).open(new)?;
         let handle = std::thread::spawn(move || -> std::io::Result<()> {
-            // fixme: maybe this is why the zstd process stays around as zombie?
-            std::io::copy(&mut z.stdout.unwrap(), &mut new_f)?;
+            std::io::copy(&mut stdout, &mut new_f)?;
             Ok(())
         });
-        ddelta::apply_chunked(&mut orig, &mut z.stdin.unwrap(), &mut patch).unwrap();
+        ddelta::apply_chunked(&mut orig, &mut stdin, &mut patch).unwrap();
+        drop(stdin);
+        let out = z.wait_with_output()?;
+        trace!("zout: {:?}", out);
+        ensure!(out.stdout.len() == 0, "stdout not empty");
+        ensure!(out.stderr.len() == 0, "stderr not empty");
+        ensure!(out.status.success(), "zstd failed");
         handle.join().unwrap()?;
     }
     orig.progress.finish_and_clear();

@@ -68,7 +68,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
 
         pg.reset_elapsed();
         pg.set_length(delta.content_length().unwrap_or(0));
-        pg.set_prefix("downloading");
+        pg.set_prefix("download");
         pg.tick();
 
         // acquire guard after sending request but before using the body
