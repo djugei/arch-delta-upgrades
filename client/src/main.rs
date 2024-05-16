@@ -4,7 +4,7 @@ use anyhow::Context;
 use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use reqwest::Url;
 use std::{
     fs::OpenOptions,
@@ -142,7 +142,9 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
         .block_on(async {
             let maxpar_req = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
             let maxpar_dl = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-            let maxpar_cpu = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+            let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            trace!("setting cpu parallelity to {parallel}");
+            let maxpar_cpu = std::sync::Arc::new(tokio::sync::Semaphore::new(parallel));
             let client = reqwest::Client::new();
 
             let total_pg = ProgressBar::new(0)
