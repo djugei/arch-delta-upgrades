@@ -10,7 +10,7 @@ use core::future::Future;
 use std::{panic, path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::fs::File;
-use tracing::{debug, error, info, Instrument};
+use tracing::{debug, error, info, trace, Instrument};
 
 use async_file_cache::FileCache;
 
@@ -67,7 +67,9 @@ fn main() {
             }
             Ok(file)
         }
-        FileCache::new(Client::new(), kf, inner_f, 8.into())
+        let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        trace!(parallel = parallel, "cpu parallelity");
+        FileCache::new(Client::new(), kf, inner_f, parallel.into())
     };
 
     let delta_cache = {
