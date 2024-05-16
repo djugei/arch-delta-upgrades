@@ -264,6 +264,9 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                 match res.unwrap() {
                     Err(e) => {
                         error!("{:?}", e);
+                        for cause in e.chain() {
+                            error!("caused by: {:#}", cause);
+                        }
                         error!("if the error is temporary, you can try running the command again");
                         lasterror = Some(e);
                     }
