@@ -95,29 +95,19 @@ fn package_parse() {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct Delta {
-    name: Str,
-    old: Str,
-    new: Str,
-    arch: Str,
-    trailer: Str,
+    old: Package,
+    new: Package,
 }
 
 impl Delta {
     pub fn get_old(self) -> Package {
-        Package {
-            name: self.name,
-            arch: self.arch,
-            trailer: self.trailer,
-            version: self.old,
-        }
+        self.old
     }
     pub fn get_new(self) -> Package {
-        Package {
-            name: self.name,
-            arch: self.arch,
-            trailer: self.trailer,
-            version: self.new,
-        }
+        self.new
+    }
+    pub fn get_both(self) -> (Package, Package) {
+        (self.old, self.new)
     }
 }
 
@@ -129,17 +119,11 @@ pub enum DeltaError {
 impl TryFrom<(Package, Package)> for Delta {
     type Error = DeltaError;
 
-    fn try_from((p1, p2): (Package, Package)) -> Result<Self, Self::Error> {
-        if p1.version == p2.version {
+    fn try_from((old, new): (Package, Package)) -> Result<Self, Self::Error> {
+        if new.version == old.version {
             Err(DeltaError::Version)
         } else {
-            Ok(Delta {
-                name: p1.name,
-                arch: p1.arch,
-                trailer: p1.trailer,
-                old: p1.version,
-                new: p2.version,
-            })
+            Ok(Delta { old, new })
         }
     }
 }
@@ -148,8 +132,8 @@ impl std::fmt::Display for Delta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}:{}_to_{}-{}.{}",
-            self.name, self.old, self.new, self.arch, self.trailer
+            "{}-{}-{}:to:{}-{}-{}",
+            self.old.name, self.old.version, self.old.arch, self.new.name, self.new.version, self.new.arch,
         )
     }
 }
