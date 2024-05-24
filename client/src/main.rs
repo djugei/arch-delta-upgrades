@@ -1,6 +1,6 @@
 mod util;
 
-use anyhow::{ensure, Context};
+use anyhow::Context;
 use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -93,8 +93,8 @@ fn main() {
             }
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-            let (deltasize, newsize) = match upgrade(server, blacklist, cachepath, multi) {
-                Ok((d, n)) => (d, n),
+            let (deltasize, newsize, comptime) = match upgrade(server, blacklist, cachepath, multi) {
+                Ok((d, n, c)) => (d, n, c),
                 Err(e) => {
                     error!("{e}");
                     panic!("{e}")
@@ -117,6 +117,12 @@ fn main() {
             info!("downloaded   {deltasize}");
             info!("upgrades are {newsize}");
             info!("saved you    {saved}");
+            if let Some(comptime) = comptime {
+                info!(
+                    "wasted {}ms on compression since arch does not provide uncompressed signatures yet",
+                    comptime.as_millis()
+                );
+            }
 
             if !exit.success() {
                 panic!("pacman -Su failed, aborting. Fix errors and try again");
@@ -131,7 +137,12 @@ fn main() {
     }
 }
 
-fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiProgress) -> anyhow::Result<(u64, u64)> {
+fn upgrade(
+    server: Url,
+    blacklist: Vec<Str>,
+    delta_cache: PathBuf,
+    multi: MultiProgress,
+) -> anyhow::Result<(u64, u64, Option<Duration>)> {
     let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
@@ -203,6 +214,7 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                         total_pg.inc(dec_size / 2);
                         dec_size -= dec_size / 2;
 
+                        let comptime;
                         {
                             let file_name = file_name.clone();
                             let p_pg = ProgressBar::new(0);
@@ -210,7 +222,7 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                             pg.finish_and_clear();
                             multi.remove(&pg);
                             let guard_cpu = maxpar_cpu.acquire_owned().await;
-                            tokio::task::spawn_blocking(move || -> Result<_, _> {
+                            comptime = tokio::task::spawn_blocking(move || -> Result<_, _> {
                                 let oldfile = Cursor::new(oldfile);
                                 let oldfile = zstd::decode_all(oldfile).unwrap();
                                 apply_patch(&oldfile, &deltafile_name, &file_name, p_pg)
@@ -223,7 +235,7 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                         let newsize = tokio::fs::File::open(&file_name).await?.metadata().await?.size();
 
                         total_pg.inc(dec_size);
-                        Ok::<_, anyhow::Error>((deltasize, newsize))
+                        Ok::<_, anyhow::Error>((deltasize, newsize, comptime))
                     };
 
                     let sigfut = async {
@@ -259,6 +271,7 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
 
             let mut deltasize = 0;
             let mut newsize = 0;
+            let mut comptime = Some(Duration::from_secs(0));
             let mut lasterror = None;
             while let Some(res) = set.join_next().await {
                 match res.unwrap() {
@@ -270,13 +283,16 @@ fn upgrade(server: Url, blacklist: Vec<Str>, delta_cache: PathBuf, multi: MultiP
                         error!("if the error is temporary, you can try running the command again");
                         lasterror = Some(e);
                     }
-                    Ok((d, n)) => {
+                    Ok((d, n, c)) => {
                         deltasize += d;
                         newsize += n;
+                        if let Some(c) = c {
+                            comptime.as_mut().map(|sum: &mut Duration| *sum += c);
+                        }
                     }
                 }
             }
-            lasterror.ok_or((deltasize, newsize)).swap()
+            lasterror.ok_or((deltasize, newsize, comptime)).swap()
         })
 }
 
@@ -309,7 +325,7 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
     Ok(())
 }
 
-fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow::Result<()> {
+fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow::Result<Option<Duration>> {
     pb.set_style(util::progress_style());
     pb.set_prefix("patching");
     pb.set_message(new.file_name().unwrap().to_string_lossy().into_owned());
@@ -326,6 +342,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
     // fixme: while the patches are perfect the compression is not bit identical
     // can try to set parallelity in zstd lib?
     // cat patched.tar | zstd -c -T0 --ultra -20 > patched.tar.zstd
+    let comptime;
     {
         let mut z = Command::new("zstd")
             .args(["-c", "-T0", "--ultra", "-20", "-"])
@@ -345,15 +362,19 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
         });
         ddelta::apply_chunked(&mut orig, &mut stdin, &mut patch).unwrap();
         drop(stdin);
-        let out = z.wait_with_output()?;
-        trace!("zout: {:?}", out);
-        ensure!(out.stdout.len() == 0, "stdout not empty");
-        ensure!(out.stderr.len() == 0, "stderr not empty");
-        ensure!(out.status.success(), "zstd failed");
+        use command_rusage::Error::*;
+        use command_rusage::GetRUsage;
+        comptime = match z.wait_for_rusage() {
+            Ok(rusage) => Some(rusage.utime + rusage.stime),
+            Err(UnsupportedPlatform) => None,
+            Err(Unavailable) => anyhow::bail!("zstd compression command failed"),
+            Err(NoSuchProcess | NotChild) => panic!("programming error"),
+        };
+        trace!("zstd compression took {:#?}", comptime);
         handle.join().unwrap()?;
     }
     orig.progress.finish_and_clear();
     info!("patched {}", new.file_name().unwrap().to_string_lossy());
 
-    Ok(())
+    Ok(comptime)
 }

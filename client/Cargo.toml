@@ -23,6 +23,7 @@ memmap2 = "*"
 bytesize = "1.3.0"
 strsim = "0.11"
 dialoguer = "*"
+command-rusage = "1.0.1"
 
 [[bin]]
 name = "deltaclient"
