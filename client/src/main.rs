@@ -118,9 +118,9 @@ fn main() {
             info!("upgrades are {newsize}");
             info!("saved you    {saved}");
             if let Some(comptime) = comptime {
-                info!(
-                    "wasted {}ms on compression since arch does not provide uncompressed signatures yet",
-                    comptime.as_millis()
+                debug!(
+                    "wasted {:?} on compression since arch does not provide uncompressed signatures yet",
+                    comptime
                 );
             }
 
@@ -370,7 +370,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
             Err(Unavailable) => anyhow::bail!("zstd compression command failed"),
             Err(NoSuchProcess | NotChild) => panic!("programming error"),
         };
-        trace!("zstd compression took {:#?}", comptime);
+        trace!("zstd compression took {:?}", comptime);
         handle.join().unwrap()?;
     }
     orig.progress.finish_and_clear();
