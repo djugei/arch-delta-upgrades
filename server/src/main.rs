@@ -16,9 +16,11 @@ use async_file_cache::FileCache;
 
 use parsing::{Delta, Package};
 
-const MIRROR: &str = "http://mirror.f4st.host/archlinux/pool/packages/";
-const FALLBACK_MIRROR: &str = "http://europe.archive.pkgbuild.com/packages/.all/";
-const LOCAL: &str = "./deltaserver/";
+use std::sync::OnceLock;
+
+static MIRROR: OnceLock<Str> = OnceLock::new();
+static FALLBACK_MIRROR: OnceLock<Str> = OnceLock::new();
+static CACHE_DIR: OnceLock<Str> = OnceLock::new();
 
 type Str = Box<str>;
 
@@ -27,17 +29,48 @@ use reqwest::Client;
 fn main() {
     console_subscriber::init();
 
-    let mut path = PathBuf::from(LOCAL);
-    path.push("pkg");
-    std::fs::create_dir_all(path).unwrap();
-    let mut path = PathBuf::from(LOCAL);
-    path.push("delta");
-    std::fs::create_dir_all(path).unwrap();
+    fn get_env_or_fallback<S: Into<Str>>(key: &str, fallback: S) -> Str {
+        std::env::var(key).map(String::into_boxed_str).unwrap_or_else(|_e| {
+            let fallback: Str = fallback.into();
+            info!(fallback = fallback, "no {key} set, using fallback");
+            fallback
+        })
+    }
+
+    MIRROR
+        .set(get_env_or_fallback(
+            "MIRROR",
+            "http://mirror.moson.org/arch/pool/packages/",
+        ))
+        .expect("init only once");
+    FALLBACK_MIRROR
+        .set(get_env_or_fallback(
+            "FALLBACK_MIRROR",
+            "http://europe.archive.pkgbuild.com/packages/.all/",
+        ))
+        .expect("init only once");
+    CACHE_DIR
+        .set(get_env_or_fallback("CACHE_DIR", "./deltaserver"))
+        .expect("init only once");
+
+    fn get_pkg_path() -> PathBuf {
+        let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
+        basepath.push("pkg");
+        basepath
+    }
+
+    fn get_delta_path() -> PathBuf {
+        let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
+        basepath.push("delta");
+        basepath
+    }
+
+    std::fs::create_dir_all(get_pkg_path()).unwrap();
+    std::fs::create_dir_all(get_delta_path()).unwrap();
 
     let package_cache = {
         let kf = |s: &_, p: &Package| {
-            let mut path = PathBuf::from(LOCAL);
-            path.push("pkg");
+            let mut path = get_pkg_path();
             path.push(p.to_string());
             path
         };
@@ -45,14 +78,16 @@ fn main() {
         async fn inner_f(client: Client, key: Package, mut file: File) -> Result<File, DownloadError> {
             use tokio::io::AsyncWriteExt;
 
-            let uri = format!("{MIRROR}{key}");
+            let mirror = MIRROR.get().expect("initialized");
+            let uri = format!("{mirror}{key}");
             debug!(key = key.to_string(), uri, "getting from primary");
             let mut response = client.get(uri).send().await?;
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 // fall back to archive mirror
+                let fallback_mirror = MIRROR.get().expect("initialized");
+                let uri = format!("{fallback_mirror}{key}");
                 info!(key = key.to_string(), "using fallback mirror");
-                let uri = format!("{FALLBACK_MIRROR}{key}");
                 response = client.get(uri).send().await?;
             }
             if !response.status().is_success() {
@@ -74,8 +109,7 @@ fn main() {
 
     let delta_cache = {
         let kf = |_: &_, d: &Delta| {
-            let mut p = PathBuf::from(LOCAL);
-            p.push("delta");
+            let mut p = get_delta_path();
             p.push(d.to_string());
             p
         };

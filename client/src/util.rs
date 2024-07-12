@@ -108,7 +108,7 @@ pub(crate) fn find_deltaupgrade_candidates(
     blacklist: &[Str],
 ) -> Result<Vec<(String, Package, Package, Mmap, u64)>, anyhow::Error> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
-    let mut packageversions = build_package_versions().expect("io error on local disk");
+    let packageversions = build_package_versions().expect("io error on local disk");
     let mut lines: Vec<_> = upgrades
         .lines()
         .map(|l| l.expect("pacman abborted output???"))
@@ -130,7 +130,7 @@ pub(crate) fn find_deltaupgrade_candidates(
                 let prompt =
                     format!("could not find cached package for {name}, {alternative} is similar, use that instead?");
                 if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
-                    newest_cached(&mut packageversions, &"lol")
+                    newest_cached(&packageversions, alternative)
                 } else {
                     None
                 }
