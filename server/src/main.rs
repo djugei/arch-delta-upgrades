@@ -27,8 +27,7 @@ type Str = Box<str>;
 use reqwest::Client;
 
 fn main() {
-    console_subscriber::init();
-
+    tracing_subscriber::fmt::init();
     fn get_env_or_fallback<S: Into<Str>>(key: &str, fallback: S) -> Str {
         std::env::var(key).map(String::into_boxed_str).unwrap_or_else(|_e| {
             let fallback: Str = fallback.into();

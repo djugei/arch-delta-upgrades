@@ -10,7 +10,7 @@ thiserror = "*"
 anyhow = "*"
 
 tracing = "*"
-console-subscriber = "*"
+tracing-subscriber = "0.3.18"
 
 tokio = { version = "*", features = ["rt", "rt-multi-thread", "sync", "fs", "io-util", "macros", "tracing"] }
 tokio-util = { version = "*", features = ["io"] }
