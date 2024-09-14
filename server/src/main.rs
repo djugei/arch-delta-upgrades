@@ -85,7 +85,7 @@ fn main() {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 // fall back to archive mirror
-                let fallback_mirror = MIRROR.get().expect("initialized");
+                let fallback_mirror = FALLBACK_MIRROR.get().expect("initialized");
                 let uri = format!("{fallback_mirror}{key}");
                 info!(key = key.to_string(), "using fallback mirror");
                 response = client.get(uri).send().await?;
