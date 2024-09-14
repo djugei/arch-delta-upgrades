@@ -191,7 +191,13 @@ fn upgrade(
                         let delta = parsing::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
                         let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
 
-                        let mut deltafile = tokio::fs::File::create(deltafile_name.clone()).await?;
+                        let mut deltafile = tokio::fs::File::options()
+                            .write(true)
+                            .truncate(false)
+                            .create(true)
+                            .open(deltafile_name.clone())
+                            .await
+                            .unwrap();
 
                         let url = format!("{server}/{oldpkg}/{newpkg}");
 

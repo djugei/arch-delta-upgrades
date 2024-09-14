@@ -40,15 +40,17 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
 
     let pg = multi.add(pg);
     pin!(target);
+    let mut target = pg.wrap_async_write(target);
     let mut tries = 3;
     'retry: loop {
         let guard = request_guard.as_ref().acquire().await?;
         pg.tick();
-        pg.set_position(0);
+        let writepos = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        // get the server to generate the delta, this is expected to time out, possibly multiple times
         let mut delta = {
             loop {
                 // catch both client and server timeouts and simply retry
-                match client.get(&url).send().await {
+                match client.get(&url).header(http::header::RANGE, writepos).send().await {
                     Ok(d) => match d.status() {
                         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
                             debug!("timeout; retrying {}", url)
@@ -75,12 +77,23 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         // so the deltas can get generated on the server as parallel as possible
         // but the download does not get fragmented/overwhelmed
         let guard = dl_guard.as_ref().acquire().await?;
+
+        match delta.status() {
+            // server does not do ranges, seek to start of file
+            StatusCode::OK => {
+                debug!("server does not seem to support range requests");
+                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            }
+            // all good, got a range response
+            StatusCode::PARTIAL_CONTENT => (),
+            s => bail!("got unknown status code {}, bailing", s),
+        }
+
+        // write all chunks from the network to the disk
         loop {
             match delta.chunk().await {
                 Ok(Some(chunk)) => {
-                    let len = chunk.len();
                     target.write_all(&chunk).await?;
-                    pg.inc(len.try_into().unwrap());
                 }
                 Ok(None) => {
                     drop(guard);
@@ -88,8 +101,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
                 }
                 Err(e) => {
                     if tries != 0 {
-                        target.seek(std::io::SeekFrom::Start(0)).await?;
-                        pg.set_position(0);
+                        // download failed here, we will retry with partial-header at the current position
                         debug!("download failed, {tries} left");
                         tries -= 1;
                         drop(guard);
