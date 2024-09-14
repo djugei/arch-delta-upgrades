@@ -2,12 +2,13 @@
 use anyhow::bail;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::get,
     Router,
 };
+use axum_extra::headers::HeaderMapExt;
 use core::future::Future;
-use std::{panic, path::PathBuf, sync::Arc};
+use std::{panic, path::PathBuf, str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio::fs::File;
 use tracing::{debug, error, info, trace, Instrument};
@@ -205,12 +206,18 @@ enum DeltaError {
     #[error("generation error: {0}")]
     DeltaGen(#[from] ddelta::DiffError),
 }
-use axum::body::Body;
-use axum::http::HeaderName;
 async fn gen_delta<S, KF, F, FF>(
     State(s): State<Arc<FileCache<Delta, S, KF, F, FF, DeltaError>>>,
     Path((from, to)): Path<(Str, Str)>,
-) -> Result<(StatusCode, [(HeaderName, String); 3], Body), (StatusCode, String)>
+    range: Option<axum_extra::TypedHeader<axum_extra::headers::Range>>,
+) -> Result<
+    (
+        StatusCode,
+        HeaderMap,
+        axum_range::RangedStream<axum_range::KnownSize<File>>,
+    ),
+    (StatusCode, String),
+>
 where
     S: Send + Sync + 'static + Clone,
     KF: Send + Sync + 'static + Fn(&S, &Delta) -> PathBuf,
@@ -240,18 +247,22 @@ where
         };
 
         let len = file.metadata().await?.len();
-        let stream = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::Body::from_stream(stream);
-        use axum::http::header;
-        let headers = [
-            (header::CONTENT_LENGTH, len.to_string()),
-            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", delta),
-            ),
-        ];
-        anyhow::Ok((StatusCode::OK, headers, body))
+        let body = axum_range::KnownSize::file(file).await?;
+        let range = range.map(|axum_extra::TypedHeader(range)| range);
+        let resp = axum_range::Ranged::new(range, body).try_respond().unwrap();
+
+        let mut h = HeaderMap::new();
+        h.typed_insert(resp.content_length);
+        if let Some(range) = resp.content_range {
+            h.typed_insert(range)
+        };
+        use axum_extra::headers;
+        h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
+        h.insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}\"", delta).as_str()).unwrap(),
+        );
+        anyhow::Ok((StatusCode::OK, h, resp.stream))
     };
     c().instrument(c_span).await.map_err(|e| {
         error!("{:?}", e);

@@ -19,6 +19,8 @@ futures-util = "*"
 axum =  { version = "*", features = [] }
 hyper = { version = "*", features = ["client", "http1", "stream", "runtime"] }
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+axum-range = "*"
+axum-extra = "*"
 
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt"] }
