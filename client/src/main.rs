@@ -62,10 +62,12 @@ fn main() {
     // set up a logger that does not conflict with progress bars
     let logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
     let multi = MultiProgress::new();
+    let level = logger.filter();
 
     indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
         .try_init()
         .expect("initializing logger failed");
+    log::set_max_level(level);
 
     let args = Commands::parse();
 
