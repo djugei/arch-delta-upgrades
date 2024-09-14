@@ -338,7 +338,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
 
     pb.set_length(orig.len().try_into().unwrap());
     let orig = Cursor::new(orig);
-    let mut orig = pb.wrap_read(orig).with_hold_max(true);
+    let mut orig = pb.wrap_read(orig);
     orig.progress.tick();
 
     let patch = OpenOptions::new().read(true).open(patch)?;
