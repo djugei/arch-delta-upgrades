@@ -11,5 +11,6 @@ tracing = "*"
 
 [dev-dependencies]
 tempfile = "*"
-env_logger = "*"
 futures-util = "*"
+tracing-subscriber = "*"
+tokio = { version = "*", features = ["sync", "fs", "io-util", "macros", "time", "rt"] }

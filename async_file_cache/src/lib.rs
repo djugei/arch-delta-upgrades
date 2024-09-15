@@ -178,11 +178,8 @@ where
 
 #[test]
 fn cache_simple() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .unwrap();
+    tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init();
+
     use futures_util::future::join_all;
     let kf = |_: &(), s: &String| PathBuf::from(s);
     async fn inner_f(_s: (), key: String, mut file: File) -> Result<File, std::io::Error> {
