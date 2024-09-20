@@ -69,7 +69,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         std::mem::drop(guard);
 
         pg.reset_elapsed();
-        pg.set_length(delta.content_length().unwrap_or(0));
+        pg.set_length(delta.content_length().unwrap_or(0) + writepos);
         pg.set_prefix("download");
         pg.tick();
 
