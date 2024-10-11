@@ -1,4 +1,3 @@
-#![allow(dead_code, unreachable_code, unused_variables)]
 use anyhow::bail;
 use axum::{
     extract::{Path, State},
@@ -7,9 +6,8 @@ use axum::{
     Router,
 };
 use axum_extra::headers::HeaderMapExt;
-use core::future::Future;
+use caches::DeltaCache;
 use std::{panic, path::PathBuf, str::FromStr, sync::Arc};
-use thiserror::Error;
 use tokio::fs::File;
 use tracing::{debug, error, info, trace, Instrument};
 
@@ -26,6 +24,20 @@ static CACHE_DIR: OnceLock<Str> = OnceLock::new();
 type Str = Box<str>;
 
 use reqwest::Client;
+
+mod caches;
+
+pub fn get_pkg_path() -> PathBuf {
+    let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
+    basepath.push("pkg");
+    basepath
+}
+
+pub fn get_delta_path() -> PathBuf {
+    let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
+    basepath.push("delta");
+    basepath
+}
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -53,119 +65,16 @@ fn main() {
         .set(get_env_or_fallback("CACHE_DIR", "./deltaserver"))
         .expect("init only once");
 
-    fn get_pkg_path() -> PathBuf {
-        let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
-        basepath.push("pkg");
-        basepath
-    }
-
-    fn get_delta_path() -> PathBuf {
-        let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
-        basepath.push("delta");
-        basepath
-    }
-
     std::fs::create_dir_all(get_pkg_path()).unwrap();
     std::fs::create_dir_all(get_delta_path()).unwrap();
 
-    let package_cache = {
-        let kf = |s: &_, p: &Package| {
-            let mut path = get_pkg_path();
-            path.push(p.to_string());
-            path
-        };
-        #[tracing::instrument(level = "info", skip(client, file), "Downloading")]
-        async fn inner_f(client: Client, key: Package, mut file: File) -> Result<File, DownloadError> {
-            use tokio::io::AsyncWriteExt;
+    // max 3 parallel downloads from mirrors
+    let package_cache = FileCache::new(caches::PackageCache(Client::new()), 3.into());
 
-            let mirror = MIRROR.get().expect("initialized");
-            let uri = format!("{mirror}{key}");
-            debug!(key = key.to_string(), uri, "getting from primary");
-            let mut response = client.get(uri).send().await?;
+    let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    trace!(parallel = parallel, "cpu parallelity");
 
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                // fall back to archive mirror
-                let fallback_mirror = FALLBACK_MIRROR.get().expect("initialized");
-                let uri = format!("{fallback_mirror}{key}");
-                info!(key = key.to_string(), "using fallback mirror");
-                response = client.get(uri).send().await?;
-            }
-            if !response.status().is_success() {
-                return Err(DownloadError::Status {
-                    status: response.status(),
-                    url: response.url().clone(),
-                });
-            }
-
-            while let Some(mut chunk) = response.chunk().await? {
-                file.write_all_buf(&mut chunk).await?;
-            }
-            Ok(file)
-        }
-        let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        trace!(parallel = parallel, "cpu parallelity");
-        FileCache::new(Client::new(), kf, inner_f, parallel.into())
-    };
-
-    let delta_cache = {
-        let kf = |_: &_, d: &Delta| {
-            let mut p = get_delta_path();
-            p.push(d.to_string());
-            p
-        };
-
-        async fn inner_f<S, KF, F, FF>(
-            state: Arc<FileCache<Package, S, KF, F, FF, DownloadError>>,
-            key: Delta,
-            patch: File,
-        ) -> Result<File, DeltaError>
-        where
-            S: Clone + Send,
-            KF: Send + Fn(&S, &Package) -> PathBuf,
-            F: Send + Fn(S, Package, File) -> FF,
-            FF: Future<Output = Result<File, DownloadError>> + Send,
-        {
-            let keystring = key.to_string();
-            let old = state.get_or_generate(key.clone().get_old());
-            let new = state.get_or_generate(key.get_new());
-            let (old, new) = tokio::join!(old, new);
-            let (old, new) = (old??, new??);
-
-            let patch = patch.into_std().await;
-            let old = old.into_std().await;
-            let mut old = zstd::Decoder::new(old)?;
-            let new = new.into_std().await;
-            let mut new = zstd::Decoder::new(new)?;
-            let span = tracing::info_span!("delta request", key = keystring);
-
-            let f: tokio::task::JoinHandle<Result<_, DeltaError>> = tokio::task::spawn_blocking(move || {
-                let mut zpatch = zstd::Encoder::new(patch, 22)?;
-                let e = zpatch.set_parameter(zstd::zstd_safe::CParameter::NbWorkers(4));
-                if let Err(e) = e {
-                    debug!("failed to make zstd multithread");
-                }
-                let mut last_report = 0;
-                ddelta::generate_chunked(&mut old, &mut new, &mut zpatch, None, |s| match s {
-                    ddelta::State::Reading => debug!(key = keystring, "reading"),
-                    ddelta::State::Sorting => debug!(key = keystring, "sorting"),
-                    ddelta::State::Working(p) => {
-                        const MB: u64 = 1024 * 1024;
-                        if p > last_report + (8 * MB) {
-                            debug!(key = keystring, "working: {}MB done", p / MB);
-                            last_report = p;
-                        }
-                    }
-                })?;
-                Ok(zpatch.finish()?)
-            });
-            let f = f.instrument(span).await.expect("threading error")?;
-
-            let f = File::from_std(f);
-
-            Ok(f)
-        }
-        FileCache::new(Arc::new(package_cache), kf, inner_f, 4.into())
-    };
+    let delta_cache = FileCache::new(caches::DeltaCache(package_cache), parallel.into());
     let delta_cache = Arc::new(delta_cache);
 
     tokio::runtime::Builder::new_current_thread()
@@ -184,30 +93,9 @@ fn main() {
             axum::serve(listener, app).await.unwrap();
         })
 }
-#[derive(Error, Debug)]
-enum DownloadError {
-    #[error("could not write to file: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("http request failed: {0}")]
-    Connection(#[from] reqwest::Error),
-    #[error("bad status code: {status} while fetching {url}")]
-    Status {
-        url: reqwest::Url,
-        status: reqwest::StatusCode,
-    },
-}
 
-#[derive(Error, Debug)]
-enum DeltaError {
-    #[error("could not download file: {0}")]
-    Download(#[from] DownloadError),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("generation error: {0}")]
-    DeltaGen(#[from] ddelta::DiffError),
-}
-async fn gen_delta<S, KF, F, FF>(
-    State(s): State<Arc<FileCache<Delta, S, KF, F, FF, DeltaError>>>,
+async fn gen_delta(
+    State(s): State<Arc<FileCache<DeltaCache>>>,
     Path((from, to)): Path<(Str, Str)>,
     range: Option<axum_extra::TypedHeader<axum_extra::headers::Range>>,
 ) -> Result<
@@ -217,13 +105,7 @@ async fn gen_delta<S, KF, F, FF>(
         axum_range::RangedStream<axum_range::KnownSize<File>>,
     ),
     (StatusCode, String),
->
-where
-    S: Send + Sync + 'static + Clone,
-    KF: Send + Sync + 'static + Fn(&S, &Delta) -> PathBuf,
-    F: Send + Sync + 'static + Fn(S, Delta, File) -> FF,
-    FF: Send + 'static + Future<Output = Result<File, DeltaError>>,
-{
+> {
     let c_span = tracing::info_span!("delta request", from, to);
     let c = || async {
         let from = Package::try_from(&*from)?;
@@ -246,9 +128,10 @@ where
             }
         };
 
-        let len = file.metadata().await?.len();
+        //let len = file.metadata().await?.len();
         let body = axum_range::KnownSize::file(file).await?;
         let range = range.map(|axum_extra::TypedHeader(range)| range);
+        debug!("range: {range:?} for {delta:?}");
         let resp = axum_range::Ranged::new(range, body).try_respond().unwrap();
 
         let mut h = HeaderMap::new();

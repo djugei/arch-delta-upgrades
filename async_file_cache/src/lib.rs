@@ -5,6 +5,23 @@ use tracing::{debug, trace};
 
 use tokio::io::AsyncSeekExt;
 use tokio::{fs::File, sync::Mutex, sync::Semaphore};
+
+pub trait Cacheable {
+    // todo: get rid of the Clone bound, it seems to not be strictly nescesary, the entry-api is just a bit unwieldy that way
+    type Key: Eq + Hash + Clone;
+    type Error;
+
+    /// Turns the Key into a path where the computation is cached
+    fn key_to_path(k: &Self::Key) -> PathBuf;
+
+    /// does the expensive operation.
+    /// should not block, either on io or on compute.
+    /// use async_runtime::spawn for calculation
+    /// and async io for io.
+    /// is expected to serialize the computed value to the provided file
+    /// should not panic but cleanup code is in place.
+    fn gen_value(&self, k: &Self::Key, f: File) -> impl Future<Output = Result<File, Self::Error>>;
+}
 /**
     File-Backed Cache:
     Execute an expensive opertion to generate a Resource and store the results in a file on disk.
@@ -15,55 +32,31 @@ use tokio::{fs::File, sync::Mutex, sync::Semaphore};
     It is possible to set a max parallelism level.
     todo: streaming, currently the whole thing is generated at once
 */
-pub struct FileCache<Key, S, KF, F, FF, E>
+pub struct FileCache<State>
 where
-    Key: Hash + PartialEq + Eq + Clone + Send,
-    S: Clone + Send,
-    KF: Send + Fn(&S, &Key) -> PathBuf,
-    F: Send + Fn(S, Key, File) -> FF,
-    FF: Future<Output = Result<File, E>> + Send,
-    E: Send,
+    State: Cacheable,
 {
-    in_flight: tokio::sync::Mutex<HashMap<Key, tokio::sync::watch::Receiver<()>>>,
-    state: S,
+    in_flight: tokio::sync::Mutex<HashMap<State::Key, tokio::sync::watch::Receiver<()>>>,
+    state: State,
     max_para: Option<Semaphore>,
-    kf: KF,
-    f: F,
 }
 
-impl<Key, S, KF, F, FF, E> FileCache<Key, S, KF, F, FF, E>
-where
-    Key: Hash + PartialEq + Eq + Clone + Send,
-    S: Clone + Send,
-    KF: Send + Fn(&S, &Key) -> PathBuf,
-    F: Send + Fn(S, Key, File) -> FF,
-    // fixme: why does this need to return a file? why not just a result
-    FF: Future<Output = Result<File, E>> + Send,
-    E: Send,
-{
+impl<State: Cacheable> FileCache<State> {
     /**
      * # Parameters:
-     * kf: function that turns the Key into a path where the result is cached
-     * f: function returning the future that does the expensive operation.
-     *    The future should not be blocking either by long calculations or io operations
-     *    use async_runtime::spawn for calculations and async io for io
-     *    f needs to take care of serializing the value to the file on its own
-     *    f should not panic, but measures are taken to not leave inconsistent state
      * max_para: maximum number of expensive operations in flight at the same time
      */
-    pub fn new(init_state: S, kf: KF, f: F, max_para: Option<usize>) -> Self {
+    pub fn new(init_state: State, max_para: Option<usize>) -> Self {
         let max_para = max_para.map(Semaphore::new);
         let in_flight = Mutex::new(HashMap::new());
         Self {
             state: init_state,
             in_flight,
             max_para,
-            kf,
-            f,
         }
     }
 
-    pub async fn get_or_generate(&self, key: Key) -> std::io::Result<Result<File, E>> {
+    pub async fn get_or_generate(&self, key: State::Key) -> std::io::Result<Result<File, State::Error>> {
         let mut oo = tokio::fs::OpenOptions::new();
         let read = oo.read(true).write(false).create(false);
         let mut oo = tokio::fs::OpenOptions::new();
@@ -76,7 +69,7 @@ where
                 Entry::Occupied(mut entry) => {
                     let mut e = entry.get_mut().clone();
                     drop(in_flight);
-                    let path = (self.kf)(&self.state, &key);
+                    let path = State::key_to_path(&key);
                     debug!("waiting {:?}", path);
                     match e.changed().await {
                         Ok(()) => {
@@ -111,7 +104,7 @@ where
                     }
                 }
                 Entry::Vacant(entry) => {
-                    let path = (self.kf)(&self.state, &key);
+                    let path = State::key_to_path(&key);
                     match read.open(&path).await {
                         Ok(f) => {
                             debug!("exists {:?}", path);
@@ -142,7 +135,7 @@ where
                                 };
                                 // do the expensive operation
 
-                                let f = (self.f)(self.state.clone(), key.clone(), w);
+                                let f = self.state.gen_value(&key, w);
                                 let f = std::pin::pin!(f);
                                 let f = f.await;
                                 let _f = match f {
@@ -178,18 +171,28 @@ where
 
 #[test]
 fn cache_simple() {
+    use futures_util::future::join_all;
+
     tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init();
 
-    use futures_util::future::join_all;
-    let kf = |_: &(), s: &String| PathBuf::from(s);
-    async fn inner_f(_s: (), key: String, mut file: File) -> Result<File, std::io::Error> {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        use tokio::io::AsyncWriteExt;
-        file.write_all(key.as_bytes()).await?;
-        Ok(file)
+    struct TestState;
+    impl Cacheable for TestState {
+        type Key = String;
+        type Error = std::io::Error;
+
+        fn key_to_path(k: &Self::Key) -> PathBuf {
+            PathBuf::from(k)
+        }
+
+        async fn gen_value(&self, key: &Self::Key, mut file: File) -> Result<File, Self::Error> {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(key.as_bytes()).await?;
+            Ok(file)
+        }
     }
 
-    let c = FileCache::new((), kf, inner_f, None);
+    let c = FileCache::new(TestState, None);
 
     let tmpdir = tempfile::TempDir::new().unwrap();
     let basepath = tmpdir.path();
