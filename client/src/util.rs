@@ -50,7 +50,8 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         let mut delta = {
             loop {
                 // catch both client and server timeouts and simply retry
-                match client.get(&url).header(http::header::RANGE, writepos).send().await {
+                let range = format!("bytes={writepos}-");
+                match client.get(&url).header(http::header::RANGE, range).send().await {
                     Ok(d) => match d.status() {
                         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
                             debug!("timeout; retrying {}", url)
