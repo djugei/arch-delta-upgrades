@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::BufRead, path::PathBuf, process::Command};
 
 use anyhow::bail;
-use http::StatusCode;
+use http::{header::CONTENT_RANGE, StatusCode};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, info};
 use memmap2::Mmap;
@@ -41,7 +41,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
     let pg = multi.add(pg);
     pin!(target);
     let mut target = pg.wrap_async_write(target);
-    let mut tries = 3;
+    let mut tries = 8_u8;
     'retry: loop {
         let guard = request_guard.as_ref().acquire().await?;
         pg.tick();
@@ -49,9 +49,14 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         // get the server to generate the delta, this is expected to time out, possibly multiple times
         let mut delta = {
             loop {
+                let mut req = client.get(&url);
+                if writepos != 0 {
+                    let range = format!("bytes={writepos}-");
+                    debug!("{pkg:?} sending range request {range}");
+                    req = req.header(http::header::RANGE, range);
+                }
                 // catch both client and server timeouts and simply retry
-                let range = format!("bytes={writepos}-");
-                match client.get(&url).header(http::header::RANGE, range).send().await {
+                match req.timeout(std::time::Duration::from_secs(60 * 2)).send().await {
                     Ok(d) => match d.status() {
                         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
                             debug!("timeout; retrying {}", url)
@@ -80,14 +85,19 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         let guard = dl_guard.as_ref().acquire().await?;
 
         match delta.status() {
-            // server does not do ranges, seek to start of file
-            StatusCode::OK => {
-                debug!("server does not seem to support range requests");
-                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-            }
-            // all good, got a range response
-            StatusCode::PARTIAL_CONTENT => (),
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
             s => bail!("got unknown status code {}, bailing", s),
+        }
+        let h = delta.headers().get(CONTENT_RANGE);
+        // todo: write better checks
+        match (writepos == 0, h) {
+            (true, None) => (),
+            (_at_start, Some(_h)) => (/*todo: check that range starts at writepos*/),
+            (false, None) => {
+                debug!("no content range on range request response");
+                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+                pg.set_position(0);
+            }
         }
 
         // write all chunks from the network to the disk
@@ -97,6 +107,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
                     target.write_all(&chunk).await?;
                 }
                 Ok(None) => {
+                    // done
                     drop(guard);
                     break 'retry;
                 }
@@ -108,7 +119,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
                         drop(guard);
                         continue 'retry;
                     } else {
-                        anyhow::bail!(e);
+                        bail!(e);
                     }
                 }
             }
