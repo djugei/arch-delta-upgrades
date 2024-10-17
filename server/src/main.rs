@@ -131,6 +131,7 @@ async fn gen_delta(
         //let len = file.metadata().await?.len();
         let body = axum_range::KnownSize::file(file).await?;
         let range = range.map(|axum_extra::TypedHeader(range)| range);
+        let is_range_req = range.is_some();
         debug!("range: {range:?} for {delta:?}");
         let resp = axum_range::Ranged::new(range, body).try_respond().unwrap();
 
@@ -145,7 +146,12 @@ async fn gen_delta(
             axum::http::header::CONTENT_DISPOSITION,
             axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}\"", delta).as_str()).unwrap(),
         );
-        anyhow::Ok((StatusCode::OK, h, resp.stream))
+        let status = if is_range_req {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        };
+        anyhow::Ok((status, h, resp.stream))
     };
     c().instrument(c_span).await.map_err(|e| {
         error!("{:?}", e);
