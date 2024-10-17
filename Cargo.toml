@@ -15,3 +15,4 @@ debug=1
 [patch.crates-io]
 ddelta = { git = "https://github.com/djugei/ddelta-rs" }
 indicatif = { git = "https://github.com/djugei/indicatif", branch = "heuristic" }
+hashbrown = { git = "https://github.com/djugei/hashbrown" }

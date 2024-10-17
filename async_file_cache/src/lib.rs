@@ -1,8 +1,9 @@
 use core::future::Future;
 use std::ffi::OsString;
-use std::{collections::HashMap, hash::Hash, io::ErrorKind, path::PathBuf, pin::pin};
+use std::{hash::Hash, io::ErrorKind, path::PathBuf, pin::pin};
 use tracing::{debug, trace};
 
+use hashbrown::HashMap;
 use tokio::io::AsyncSeekExt;
 use tokio::{fs::File, sync::Mutex, sync::Semaphore};
 
@@ -64,9 +65,9 @@ impl<State: Cacheable> FileCache<State> {
 
         loop {
             let mut in_flight = self.in_flight.lock().await;
-            use std::collections::hash_map::Entry;
-            match (*in_flight).entry(key.clone()) {
-                Entry::Occupied(mut entry) => {
+            use hashbrown::hash_map::EntryRef;
+            match (*in_flight).entry_ref(&key) {
+                EntryRef::Occupied(mut entry) => {
                     let mut e = entry.get_mut().clone();
                     drop(in_flight);
                     let path = State::key_to_path(&key);
@@ -74,6 +75,8 @@ impl<State: Cacheable> FileCache<State> {
                     match e.changed().await {
                         Ok(()) => {
                             // weird but ok(ok()))
+                            // todo: only open the file once, ever
+                            // this is a slight race-condition where the file could be deleted from the fs in between this and the previous line currently
                             return Ok(Ok(read.open(path).await?));
                         }
                         Err(_) => {
@@ -81,6 +84,7 @@ impl<State: Cacheable> FileCache<State> {
                             // paniced internally or the whole future has been dropped in flight.
                             // we need to remove the entry and file and try again.
 
+                            // fixme: doesn't this file need to be deleted while locking the hashmap?
                             if let Err(e) = tokio::fs::remove_file(path).await {
                                 // not found is fine thats what we want
                                 if e.kind() != ErrorKind::NotFound {
@@ -93,7 +97,7 @@ impl<State: Cacheable> FileCache<State> {
                             // other ones get either an empty entry or a new entry with a different
                             // channel
                             let mut in_flight = self.in_flight.lock().await;
-                            if let Entry::Occupied(entry) = (*in_flight).entry(key.clone()) {
+                            if let EntryRef::Occupied(entry) = (*in_flight).entry_ref(&key) {
                                 if e.same_channel(entry.get()) {
                                     entry.remove();
                                 }
@@ -103,7 +107,7 @@ impl<State: Cacheable> FileCache<State> {
                         }
                     }
                 }
-                Entry::Vacant(entry) => {
+                EntryRef::Vacant(entry) => {
                     let path = State::key_to_path(&key);
                     match read.open(&path).await {
                         Ok(f) => {
@@ -117,7 +121,7 @@ impl<State: Cacheable> FileCache<State> {
                             } else {
                                 debug!("generating {:?}", path);
                                 let (tx, rx) = tokio::sync::watch::channel(());
-                                entry.insert(rx);
+                                entry.insert_clone(rx);
 
                                 let mut part_path = path.clone();
                                 part_path.as_mut_os_string().push(OsString::from(".part"));

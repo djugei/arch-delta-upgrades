@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "*", features = ["sync", "fs", "io-util", "macros"] }
 tracing = "*"
+hashbrown = "*"
 
 [dev-dependencies]
 tempfile = "*"
