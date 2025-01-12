@@ -352,12 +352,14 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         )
     }
 
+    // todo: do this in one iteration
     let total_len: u64 = pairs.iter().map(|e| e.3).sum();
     let total_dlen: u64 = pairs.iter().map(|e| e.4).sum();
 
     info!("{} saved in total", ByteSize::b(total_len - total_dlen));
     let ratio = total_dlen as f64 / total_len as f64;
     info!("total ratio: {:.2}%", ratio * 100.);
+    // On my machine I get 84.47% bandwidth saved.
     info!("saved {:.2}% of bandwidth", (1. - ratio) * 100.);
 
     Ok(())
