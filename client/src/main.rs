@@ -21,16 +21,11 @@ type Str = Box<str>;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 enum Commands {
-    #[cfg(feature = "diff")]
-    Delta {
-        orig: PathBuf,
-        new: PathBuf,
-        patch: PathBuf,
-    },
-    Patch {
-        orig: PathBuf,
-        patch: PathBuf,
-        new: PathBuf,
+    /// Run an entire upgrade, calling pacman interally, needs sudo to run.
+    Upgrade {
+        server: Url,
+        #[arg(default_values_t = [Box::<str>::from("linux")])]
+        blacklist: Vec<Box<str>>,
     },
     /// Download the newest packages to the provided delta_cache path
     ///
@@ -50,11 +45,23 @@ enum Commands {
     /// If you are doing a full sysupgrade try the upgrade subcommand for more comfort.
     #[command(verbatim_doc_comment)]
     Download { server: Url, delta_cache: PathBuf },
-    /// run an entire upgrade, calling pacman interally, needs sudo to run.
-    Upgrade {
-        server: Url,
-        #[arg(default_values_t = [Box::<str>::from("linux")])]
-        blacklist: Vec<Box<str>>,
+    /// Calculate and display some statistics about effectiveness of the delta-encoding
+    Stats {
+        /// Number of best/worst entries to display
+        number: Option<usize>,
+    },
+    #[cfg(feature = "diff")]
+    /// Debug: generate a delta
+    Delta {
+        orig: PathBuf,
+        new: PathBuf,
+        patch: PathBuf,
+    },
+    /// Debug: manually apply a patch
+    Patch {
+        orig: PathBuf,
+        patch: PathBuf,
+        new: PathBuf,
     },
 }
 
@@ -136,6 +143,7 @@ fn main() {
             std::fs::create_dir_all(&delta_cache).unwrap();
             upgrade(server, vec![], delta_cache, multi).unwrap();
         }
+        Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
     }
 }
 

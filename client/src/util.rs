@@ -1,8 +1,10 @@
 use std::{collections::HashMap, io::BufRead, path::PathBuf, process::Command};
 
 use anyhow::bail;
+use bytesize::ByteSize;
 use http::{header::CONTENT_RANGE, StatusCode};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use log::{debug, info};
 use memmap2::Mmap;
 use parsing::Package;
@@ -45,13 +47,13 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
     'retry: loop {
         let guard = request_guard.as_ref().acquire().await?;
         pg.tick();
-        let writepos = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        let write_offset = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
         // get the server to generate the delta, this is expected to time out, possibly multiple times
         let mut delta = {
             loop {
                 let mut req = client.get(&url);
-                if writepos != 0 {
-                    let range = format!("bytes={writepos}-");
+                if write_offset != 0 {
+                    let range = format!("bytes={write_offset}-");
                     debug!("{pkg:?} sending range request {range}");
                     req = req.header(http::header::RANGE, range);
                 }
@@ -75,7 +77,12 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         std::mem::drop(guard);
 
         pg.reset_elapsed();
-        pg.set_length(delta.content_length().unwrap_or(0) + writepos);
+        pg.set_length(delta.content_length().map(|c| c + write_offset).unwrap_or(0));
+        debug!(
+            "content_length: {:?}, write_offset: {}",
+            delta.content_length(),
+            write_offset
+        );
         pg.set_prefix("download");
         pg.tick();
 
@@ -89,10 +96,11 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
             s => bail!("got unknown status code {}, bailing", s),
         }
         let h = delta.headers().get(CONTENT_RANGE);
-        // todo: write better checks
-        match (writepos == 0, h) {
+        match (write_offset == 0, h) {
             (true, None) => (),
-            (_at_start, Some(_h)) => (/*todo: check that range starts at writepos*/),
+            (_at_start, Some(_h)) => {
+                (/* todo: maybe parse the range header and check that it starts at the write_offset */)
+            }
             (false, None) => {
                 debug!("no content range on range request response");
                 target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
@@ -229,4 +237,123 @@ fn newest_cached(pv: &PackageVersions, package_name: &str) -> Option<(Package, P
                 path.clone(),
             )
         })
+}
+
+/// Calculates and prints some stats about bandwidth savings
+pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
+    let mut deltas: HashMap<(Str, Str, Str), u64> = HashMap::new();
+    let mut pkgs: HashMap<(Str, Str, Str), u64> = HashMap::new();
+    let mut pairs: HashMap<Str, (u64, u64, u64)> = HashMap::new();
+    for line in std::fs::read_dir(PACMAN_CACHE)? {
+        let line = line?;
+        if !line.file_type()?.is_file() {
+            continue;
+        }
+        let filename = line.file_name();
+        let filename: String = filename.into_string().unwrap();
+        if filename.ends_with(".delta") {
+            let (base, _ext) = filename.rsplit_once('.').unwrap();
+            let (_old, new) = base.rsplit_once(':').unwrap();
+            let (name, rest) = new.split_once('-').unwrap();
+            let (version, arch) = rest.rsplit_once('-').unwrap();
+            let len = line.metadata()?.len();
+            deltas.insert((name.into(), version.into(), arch.into()), len);
+        } else if filename.ends_with(".pkg.tar.zst") {
+            let (name, version, arch, _trailer) = Package::try_from(filename.as_str())
+                .expect("weird pkg file name")
+                .destructure();
+            let len = line.metadata()?.len();
+            if let Some(((name, _version, _arch), dlen)) =
+                deltas.remove_entry(&(name.clone(), version.clone(), arch.clone()))
+            {
+                pairs
+                    .entry(name)
+                    .and_modify(|e| {
+                        e.0 += 1;
+                        e.1 += len;
+                        e.2 += dlen;
+                    })
+                    .or_insert((1, len, dlen));
+            } else {
+                pkgs.insert((name, version, arch), len);
+            }
+        } else {
+            continue;
+        }
+    }
+    let mut unmatched = 0;
+    for ((name, version, arch), len) in pkgs.drain() {
+        if let Some(((name, _version, _arch), dlen)) = deltas.remove_entry(&(name, version, arch)) {
+            pairs
+                .entry(name)
+                .and_modify(|e| {
+                    e.0 += 1;
+                    e.1 += len;
+                    e.2 += dlen;
+                })
+                .or_insert((1, len, dlen));
+        } else {
+            unmatched += 1;
+        }
+    }
+    info!("{unmatched} packages did not have an associated delta");
+    let mut pairs = pairs
+        .drain()
+        .map(|(name, (count, len, dlen))| {
+            let ratio = (len as f64 - dlen as f64) / len as f64;
+            let abs = len.abs_diff(dlen) / count;
+            (ratio, name, count, len, dlen, abs)
+        })
+        .collect_vec();
+    // todo: create stats type instead of having a big tuple
+    pairs.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    for (_, name, _, len, dlen, _) in pairs.iter() {
+        if len < dlen {
+            debug!("big delta in {}: {}:{}", name, ByteSize::b(*len), ByteSize::b(*dlen))
+        }
+    }
+
+    info!("worst ratios:");
+    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().take(count).enumerate() {
+        info!(
+            "{}: {:.2}% {}. {} {} each update",
+            i + 1,
+            ratio * 100.,
+            name,
+            ByteSize::b(*abs),
+            if dlen < len { "saved" } else { "wasted" }
+        )
+    }
+
+    info!("top ratios:");
+    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
+        info!(
+            "{}: {:.2}% {}. {} {} each update",
+            i + 1,
+            ratio * 100.,
+            name,
+            ByteSize::b(*abs),
+            if dlen < len { "saved" } else { "wasted" }
+        )
+    }
+    // todo: use heap instead
+    pairs.sort_by_key(|e| e.5 * e.2);
+    info!("top size saves");
+    for (i, (ratio, name, count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
+        info!(
+            "{}: {:.2}% {}. {} {}",
+            i + 1,
+            ratio * 100.,
+            name,
+            ByteSize::b(*abs * count),
+            if dlen < len { "saved" } else { "wasted" }
+        )
+    }
+
+    info!(
+        "{} saved in total",
+        ByteSize::b(pairs.iter().map(|e| e.3 as i64 - e.4 as i64).sum::<i64>() as u64)
+    );
+    Ok(())
 }
