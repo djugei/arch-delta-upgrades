@@ -300,7 +300,7 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     let mut pairs = pairs
         .drain()
         .map(|(name, (count, len, dlen))| {
-            let ratio = (len as f64 - dlen as f64) / len as f64;
+            let ratio = dlen as f64 / len as f64;
             let abs = len.abs_diff(dlen) / count;
             (ratio, name, count, len, dlen, abs)
         })
@@ -315,9 +315,9 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     }
 
     info!("worst ratios:");
-    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().take(count).enumerate() {
+    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
         info!(
-            "{}: {:.2}% {}. {} {} each update",
+            "{}. {:.2}% {}: {} {} each update",
             i + 1,
             ratio * 100.,
             name,
@@ -327,9 +327,9 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     }
 
     info!("top ratios:");
-    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
+    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().take(count).enumerate() {
         info!(
-            "{}: {:.2}% {}. {} {} each update",
+            "{}. {:.2}% {}: {} {} each update",
             i + 1,
             ratio * 100.,
             name,
@@ -342,18 +342,23 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     info!("top size saves");
     for (i, (ratio, name, count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
         info!(
-            "{}: {:.2}% {}. {} {}",
+            "{}. {:.2}% {}: {} {} in {} updates",
             i + 1,
             ratio * 100.,
             name,
             ByteSize::b(*abs * count),
-            if dlen < len { "saved" } else { "wasted" }
+            if dlen < len { "saved" } else { "wasted" },
+            count
         )
     }
 
-    info!(
-        "{} saved in total",
-        ByteSize::b(pairs.iter().map(|e| e.3 as i64 - e.4 as i64).sum::<i64>() as u64)
-    );
+    let total_len: u64 = pairs.iter().map(|e| e.3).sum();
+    let total_dlen: u64 = pairs.iter().map(|e| e.4).sum();
+
+    info!("{} saved in total", ByteSize::b(total_len - total_dlen));
+    let ratio = total_dlen as f64 / total_len as f64;
+    info!("total ratio: {:.2}%", ratio * 100.);
+    info!("saved {:.2}% of bandwidth", (1. - ratio) * 100.);
+
     Ok(())
 }
