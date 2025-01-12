@@ -24,7 +24,7 @@ enum Commands {
     /// Run an entire upgrade, calling pacman interally, needs sudo to run.
     Upgrade {
         server: Url,
-        #[arg(default_values_t = [Box::<str>::from("linux")])]
+        #[arg(default_values_t = [Str::from("linux"), Str::from("blas"), Str::from("lapack")])]
         blacklist: Vec<Box<str>>,
     },
     /// Download the newest packages to the provided delta_cache path
