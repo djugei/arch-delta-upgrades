@@ -27,7 +27,7 @@ impl Cacheable for PackageCache {
     type Key = Package;
     type Error = DownloadError;
 
-    fn key_to_path(p: &Self::Key) -> PathBuf {
+    fn key_to_path(&self, p: &Self::Key) -> PathBuf {
         let mut path = crate::get_pkg_path();
         path.push(p.to_string());
         path
@@ -79,7 +79,7 @@ impl Cacheable for DeltaCache {
     type Key = Delta;
     type Error = DeltaError;
 
-    fn key_to_path(d: &Self::Key) -> PathBuf {
+    fn key_to_path(&self, d: &Self::Key) -> PathBuf {
         let mut p = crate::get_delta_path();
         p.push(d.to_string());
         p

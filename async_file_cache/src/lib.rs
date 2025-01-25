@@ -13,7 +13,7 @@ pub trait Cacheable {
     type Error;
 
     /// Turns the Key into a path where the computation is cached
-    fn key_to_path(k: &Self::Key) -> PathBuf;
+    fn key_to_path(&self, k: &Self::Key) -> PathBuf;
 
     /// does the expensive operation.
     /// should not block, either on io or on compute.
@@ -70,7 +70,7 @@ impl<State: Cacheable> FileCache<State> {
                 EntryRef::Occupied(mut entry) => {
                     let mut e = entry.get_mut().clone();
                     drop(in_flight);
-                    let path = State::key_to_path(&key);
+                    let path = self.state.key_to_path(&key);
                     debug!("waiting {:?}", path);
                     match e.changed().await {
                         Ok(()) => {
@@ -108,7 +108,7 @@ impl<State: Cacheable> FileCache<State> {
                     }
                 }
                 EntryRef::Vacant(entry) => {
-                    let path = State::key_to_path(&key);
+                    let path = self.state.key_to_path(&key);
                     match read.open(&path).await {
                         Ok(f) => {
                             debug!("exists {:?}", path);
@@ -137,8 +137,8 @@ impl<State: Cacheable> FileCache<State> {
                                 } else {
                                     None
                                 };
-                                // do the expensive operation
 
+                                // do the expensive operation
                                 let f = self.state.gen_value(&key, w);
                                 let f = std::pin::pin!(f);
                                 let f = f.await;
@@ -184,7 +184,7 @@ fn cache_simple() {
         type Key = String;
         type Error = std::io::Error;
 
-        fn key_to_path(k: &Self::Key) -> PathBuf {
+        fn key_to_path(&self, k: &Self::Key) -> PathBuf {
             PathBuf::from(k)
         }
 
