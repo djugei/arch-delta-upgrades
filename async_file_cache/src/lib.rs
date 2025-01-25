@@ -25,10 +25,10 @@ pub trait Cacheable {
 }
 /**
     File-Backed Cache:
-    Execute an expensive opertion to generate a Resource and store the results in a file on disk.
+    Execute an expensive operation to generate a Resource and store the results in a file on disk.
     If the same resource is requested again it will be produced from disk.
     If the same resource is requested while it is also being generated it will be generated only
-    once (dogpiling is prevented).
+    once (dog-piling is prevented).
 
     It is possible to set a max parallelism level.
     todo: streaming, currently the whole thing is generated at once
@@ -46,6 +46,8 @@ impl<State: Cacheable> FileCache<State> {
     /**
      * # Parameters:
      * max_para: maximum number of expensive operations in flight at the same time
+     * Be mindful when crating multiple instances based on the same Cacheable.
+     * They will access the same folder and interfere with each others operations.
      */
     pub fn new(init_state: State, max_para: Option<usize>) -> Self {
         let max_para = max_para.map(Semaphore::new);
@@ -190,6 +192,9 @@ fn cache_simple() {
 
         async fn gen_value(&self, key: &Self::Key, mut file: File) -> Result<File, Self::Error> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if key.ends_with('f') {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
             use tokio::io::AsyncWriteExt;
             file.write_all(key.as_bytes()).await?;
             Ok(file)
@@ -230,6 +235,7 @@ fn cache_simple() {
                 e.unwrap().unwrap();
             }
 
+            debug!("running 3 concurrent futures");
             debug!("expecting gen-wait-wait");
             let mut futs = Vec::new();
             for i in 3..6 {
@@ -248,6 +254,30 @@ fn cache_simple() {
             let f = join_all(futs);
             for e in f.await {
                 e.unwrap().unwrap();
+            }
+
+            debug!("running 3 concurrent futures on a failing generator");
+            debug!("expecting:");
+            debug!("gen wait wait fail");
+            debug!("gen wait fail");
+            debug!("gen fail");
+            let mut futs = Vec::new();
+            for i in 0..3 {
+                let mut i = i.to_string();
+                i.push('f');
+                let p = basepath.join(i);
+                let p = p.to_str().unwrap().to_owned();
+
+                let fut = c.get_or_generate(p.clone());
+                futs.push(fut);
+                let fut = c.get_or_generate(p.clone());
+                futs.push(fut);
+                let fut = c.get_or_generate(p.clone());
+                futs.push(fut);
+            }
+            let f = join_all(futs);
+            for e in f.await {
+                assert!(e.unwrap().is_err());
             }
         });
     drop(c);
