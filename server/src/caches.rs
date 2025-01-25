@@ -5,6 +5,7 @@ use parsing::{Delta, Package};
 use reqwest::Client;
 use thiserror::Error;
 use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, Instrument};
 
 use crate::{FALLBACK_MIRROR, MIRROR};
@@ -35,10 +36,8 @@ impl Cacheable for PackageCache {
 
     #[tracing::instrument(level = "info", skip(self, file), "Downloading")]
     async fn gen_value(&self, key: &Self::Key, mut file: File) -> Result<File, Self::Error> {
-        use tokio::io::AsyncWriteExt;
-
         let mirror = MIRROR.get().expect("initialized");
-        let uri = format!("{mirror}{key}");
+        let uri = format!("{mirror}pool/packages/{key}");
         debug!(key = key.to_string(), uri, "getting from primary");
         let mut response = self.0.get(uri).send().await?;
 

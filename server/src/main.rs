@@ -50,10 +50,7 @@ fn main() {
     }
 
     MIRROR
-        .set(get_env_or_fallback(
-            "MIRROR",
-            "http://mirror.moson.org/arch/pool/packages/",
-        ))
+        .set(get_env_or_fallback("MIRROR", "http://mirror.moson.org/arch/"))
         .expect("init only once");
     FALLBACK_MIRROR
         .set(get_env_or_fallback(
