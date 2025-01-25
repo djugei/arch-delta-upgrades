@@ -59,6 +59,10 @@ impl<State: Cacheable> FileCache<State> {
         }
     }
 
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
     pub async fn get_or_generate(&self, key: State::Key) -> std::io::Result<Result<File, State::Error>> {
         let mut oo = tokio::fs::OpenOptions::new();
         let read = oo.read(true).write(false).create(false);

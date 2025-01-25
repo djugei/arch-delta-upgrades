@@ -1,14 +1,17 @@
 use anyhow::bail;
 use axum::{
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     routing::get,
     Router,
 };
+use axum_extra::headers;
 use axum_extra::headers::HeaderMapExt;
-use caches::DeltaCache;
+use caches::{DBCache, DeltaCache};
 use std::{panic, path::PathBuf, str::FromStr, sync::Arc};
 use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, trace, Instrument};
 
 use async_file_cache::FileCache;
@@ -39,6 +42,11 @@ pub fn get_delta_path() -> PathBuf {
     basepath
 }
 
+pub fn get_db_path() -> PathBuf {
+    let mut basepath = PathBuf::from(CACHE_DIR.get().expect("initialized").as_ref());
+    basepath.push("db");
+    basepath
+}
 fn main() {
     tracing_subscriber::fmt::init();
     fn get_env_or_fallback<S: Into<Str>>(key: &str, fallback: S) -> Str {
@@ -64,15 +72,25 @@ fn main() {
 
     std::fs::create_dir_all(get_pkg_path()).unwrap();
     std::fs::create_dir_all(get_delta_path()).unwrap();
+    std::fs::create_dir_all(get_db_path()).unwrap();
+
+    let client = Client::new();
 
     // max 3 parallel downloads from mirrors
-    let package_cache = FileCache::new(caches::PackageCache(Client::new()), 3.into());
+    let package_cache = FileCache::new(caches::PackageCache(client.clone()), 3.into());
 
     let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     trace!(parallel = parallel, "cpu parallelity");
 
     let delta_cache = FileCache::new(caches::DeltaCache(package_cache), parallel.into());
-    let delta_cache = Arc::new(delta_cache);
+    let delta_cache = delta_cache;
+
+    let state = AppState {
+        pkg: delta_cache.into(),
+        core: DBCache::new("main".into(), client.clone()).unwrap().into(),
+        extra: DBCache::new("extra".into(), client.clone()).unwrap().into(),
+        multilib: DBCache::new("multilib".into(), client.clone()).unwrap().into(),
+    };
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -82,8 +100,10 @@ fn main() {
             let app = Router::new()
                 .fallback(fallback)
                 .route("/", get(root))
-                .route("/arch/:from/:to", get(gen_delta))
-                .with_state(delta_cache);
+                .route("/arch/{from}/{to}", get(gen_delta))
+                .route("/archdb/{name}/{old}", get(db))
+                .route("/archdb/{name}", get(db))
+                .with_state(state);
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -91,18 +111,63 @@ fn main() {
         })
 }
 
+#[derive(Clone)]
+struct AppState {
+    pkg: Arc<FileCache<DeltaCache>>,
+    core: Arc<DBCache>,
+    extra: Arc<DBCache>,
+    multilib: Arc<DBCache>,
+}
+
+type RangeFile = axum_range::RangedStream<axum_range::KnownSize<File>>;
+
+async fn db(
+    State(s): State<AppState>,
+    Path((name, old)): Path<(Str, Option<u64>)>,
+) -> Result<(StatusCode, HeaderMap, Body), (StatusCode, String)> {
+    let db = match name.as_ref() {
+        "core" => s.core,
+        "extra" => s.extra,
+        "multilib" => s.multilib,
+        _ => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "currently only core, extra and multilib are supported.".into(),
+            ))
+        }
+    };
+
+    let mut h = HeaderMap::new();
+    h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
+    if let Some(old) = old {
+        let (stamp, patch) = db.get_delta_to(old).await.unwrap();
+        //TODO handle 304 (unchanged) case
+
+        h.insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}-{}\"", name, old, stamp).as_str())
+                .unwrap(),
+        );
+
+        let body = Body::from_stream(ReaderStream::new(patch));
+        Ok((StatusCode::OK, h, body))
+    } else {
+        let (stamp, file) = db.get_newest_db().await.unwrap();
+        h.insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}\"", name, stamp).as_str()).unwrap(),
+        );
+        let body = Body::from_stream(ReaderStream::new(file));
+        Ok((StatusCode::OK, h, body))
+    }
+}
+
 async fn gen_delta(
-    State(s): State<Arc<FileCache<DeltaCache>>>,
+    State(s): State<AppState>,
     Path((from, to)): Path<(Str, Str)>,
     range: Option<axum_extra::TypedHeader<axum_extra::headers::Range>>,
-) -> Result<
-    (
-        StatusCode,
-        HeaderMap,
-        axum_range::RangedStream<axum_range::KnownSize<File>>,
-    ),
-    (StatusCode, String),
-> {
+) -> Result<(StatusCode, HeaderMap, RangeFile), (StatusCode, String)> {
+    let s = s.pkg.clone();
     let c_span = tracing::info_span!("delta request", from, to);
     let c = || async {
         let from = Package::try_from(&*from)?;
@@ -137,7 +202,6 @@ async fn gen_delta(
         if let Some(range) = resp.content_range {
             h.typed_insert(range)
         };
-        use axum_extra::headers;
         h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
         h.insert(
             axum::http::header::CONTENT_DISPOSITION,
