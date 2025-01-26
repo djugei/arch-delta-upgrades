@@ -1,0 +1,10 @@
+[package]
+name = "ruma-headers"
+version = "0.1.0"
+edition = "2024"
+description = "Header parsers, specifically for ContentDisposition copied from ruma-common#9f87ace280fe"
+license = "MIT"
+
+[dependencies]
+thiserror = "*"
+percent-encoding = "*"
