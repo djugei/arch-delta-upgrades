@@ -9,8 +9,8 @@ use axum::{
 use axum_extra::headers;
 use axum_extra::headers::HeaderMapExt;
 use caches::{DBCache, DeltaCache};
-use std::{panic, path::PathBuf, str::FromStr, sync::Arc};
-use tokio::fs::File;
+use std::{io::SeekFrom, panic, path::PathBuf, str::FromStr, sync::Arc};
+use tokio::{fs::File, io::AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, trace, Instrument};
 
@@ -87,7 +87,7 @@ fn main() {
 
     let state = AppState {
         pkg: delta_cache.into(),
-        core: DBCache::new("main".into(), client.clone()).unwrap().into(),
+        core: DBCache::new("core".into(), client.clone()).unwrap().into(),
         extra: DBCache::new("extra".into(), client.clone()).unwrap().into(),
         multilib: DBCache::new("multilib".into(), client.clone()).unwrap().into(),
     };
@@ -101,8 +101,8 @@ fn main() {
                 .fallback(fallback)
                 .route("/", get(root))
                 .route("/arch/{from}/{to}", get(gen_delta))
-                .route("/archdb/{name}/{old}", get(db))
                 .route("/archdb/{name}", get(db))
+                .route("/archdb/{name}/{old}", get(dbdelta))
                 .with_state(state);
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -121,10 +121,13 @@ struct AppState {
 
 type RangeFile = axum_range::RangedStream<axum_range::KnownSize<File>>;
 
+#[tracing::instrument(level = "debug", skip(s), "DBDL")]
 async fn db(
     State(s): State<AppState>,
-    Path((name, old)): Path<(Str, Option<u64>)>,
+    Path(name): Path<Str>,
 ) -> Result<(StatusCode, HeaderMap, Body), (StatusCode, String)> {
+    debug!("entering db fn with {}", name);
+
     let db = match name.as_ref() {
         "core" => s.core,
         "extra" => s.extra,
@@ -137,29 +140,58 @@ async fn db(
         }
     };
 
+    info!(name = name, "getting");
+
     let mut h = HeaderMap::new();
     h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
-    if let Some(old) = old {
-        let (stamp, patch) = db.get_delta_to(old).await.unwrap();
-        //TODO handle 304 (unchanged) case
+    info!(name = name, "fulldb requested for",);
+    let (stamp, mut file) = db.get_newest_db().await.expect("db download failed");
+    h.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}\"", name, stamp).as_str()).unwrap(),
+    );
+    let len = file.seek(SeekFrom::End(0)).await.unwrap();
+    file.rewind().await.unwrap();
+    h.typed_insert(headers::ContentLength(len));
+    let body = Body::from_stream(ReaderStream::new(file));
+    Ok((StatusCode::OK, h, body))
+}
 
-        h.insert(
-            axum::http::header::CONTENT_DISPOSITION,
-            axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}-{}\"", name, old, stamp).as_str())
-                .unwrap(),
-        );
+#[tracing::instrument(level = "debug", skip(s), "DBDelta")]
+async fn dbdelta(
+    State(s): State<AppState>,
+    Path((name, old)): Path<(Str, u64)>,
+) -> Result<(StatusCode, HeaderMap, Body), (StatusCode, String)> {
+    debug!("entering db fn with {} {:?}", name, old);
 
-        let body = Body::from_stream(ReaderStream::new(patch));
-        Ok((StatusCode::OK, h, body))
-    } else {
-        let (stamp, file) = db.get_newest_db().await.unwrap();
-        h.insert(
-            axum::http::header::CONTENT_DISPOSITION,
-            axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}\"", name, stamp).as_str()).unwrap(),
-        );
-        let body = Body::from_stream(ReaderStream::new(file));
-        Ok((StatusCode::OK, h, body))
-    }
+    let db = match name.as_ref() {
+        "core" => s.core,
+        "extra" => s.extra,
+        "multilib" => s.multilib,
+        _ => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "currently only core, extra and multilib are supported.".into(),
+            ))
+        }
+    };
+
+    info!(name = name, "getting");
+
+    let mut h = HeaderMap::new();
+    h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
+    info!(name = name, old = old, "dbdelta requested for",);
+    let (stamp, patch) = db.get_delta_to(old).await.expect("dbdelta generating failed");
+    //TODO handle 304 (unchanged) case
+
+    h.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}-{}\"", name, old, stamp).as_str())
+            .unwrap(),
+    );
+
+    let body = Body::from_stream(ReaderStream::new(patch));
+    Ok((StatusCode::OK, h, body))
 }
 
 async fn gen_delta(
@@ -190,7 +222,6 @@ async fn gen_delta(
             }
         };
 
-        //let len = file.metadata().await?.len();
         let body = axum_range::KnownSize::file(file).await?;
         let range = range.map(|axum_extra::TypedHeader(range)| range);
         let is_range_req = range.is_some();
