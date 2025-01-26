@@ -183,6 +183,7 @@ async fn dbdelta(
     info!(name = name, old = old, "dbdelta requested for",);
     let (stamp, patch) = db.get_delta_to(old).await.expect("dbdelta generating failed");
     //TODO handle 304 (unchanged) case
+    //TODO the old version the client has may have already been expunged, thats a somewhat common case so better handle it gracefully.
 
     h.insert(
         axum::http::header::CONTENT_DISPOSITION,

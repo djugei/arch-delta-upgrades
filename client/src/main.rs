@@ -5,7 +5,7 @@ use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info, trace};
-use reqwest::Url;
+use reqwest::{Client, Url};
 use std::{
     fs::OpenOptions,
     io::{Cursor, ErrorKind},
@@ -27,17 +27,23 @@ enum Commands {
         #[arg(default_values_t = [Str::from("linux"), Str::from("blas"), Str::from("lapack")])]
         blacklist: Vec<Box<str>>,
     },
+    /// Upgrade the databases using deltas, ~= pacman -Sy
+    //TODO: target directory/rootless mode
+    Sync { server: Url },
     /// Download the newest packages to the provided delta_cache path
     ///
     /// If delta_cache is somewhere you can write, no sudo is needed.
     ///
     /// ```bash
-    /// $ pacman -Sy
+    /// // todo make this rootless
+    /// $ sudo deltaclient sync http://bogen.moeh.re/
+    /// ## or
+    /// $ sudo pacman -Sy
     ///
-    /// $ deltaclient download http://bogen.moeh.re/arch path
+    /// $ deltaclient download http://bogen.moeh.re/ path
     /// $ sudo cp path/*.pkg path/*.sig /var/cache/pacman/pkg/
     /// ## or
-    /// $ sudo deltaclient download http://bogen.moeh.re/arch /var/cache/pacman/pkg/
+    /// $ sudo deltaclient download http://bogen.moeh.re/ /var/cache/pacman/pkg/
     ///
     /// $ sudo pacman -Su
     /// ```
@@ -90,16 +96,8 @@ fn main() {
             apply_patch(&orig, &patch, &new, pb).unwrap();
         }
         Commands::Upgrade { server, blacklist } => {
-            info!("running pacman -Sy");
-            let exit = Command::new("pacman")
-                .arg("-Sy")
-                .spawn()
-                .expect("could not run pacman -Sy")
-                .wait()
-                .expect("error waiting for pacman -Sy");
-            if !exit.success() {
-                panic!("pacman -Sy failed, aborting");
-            }
+            info!("syncing databases");
+            sync(server.clone(), multi.clone()).unwrap();
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
             let (deltasize, newsize, comptime) = match upgrade(server, blacklist, cachepath, multi) {
@@ -143,8 +141,29 @@ fn main() {
             std::fs::create_dir_all(&delta_cache).unwrap();
             upgrade(server, vec![], delta_cache, multi).unwrap();
         }
+        Commands::Sync { server } => {
+            sync(server, multi).unwrap();
+        }
         Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
     }
+}
+
+fn sync(server: Url, multi: MultiProgress) -> anyhow::Result<()> {
+    let server = server.join("archdb/")?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("could not build async runtime")
+        .block_on(async {
+            let client = Client::new();
+            //TODO sync databases configured in /etc/pacman.conf
+            let (_core, _extra, _multilib) = tokio::try_join!(
+                util::sync_db(server.clone(), "core".into(), client.clone(), multi.clone()),
+                util::sync_db(server.clone(), "extra".into(), client.clone(), multi.clone()),
+                util::sync_db(server.clone(), "multilib".into(), client, multi),
+            )?;
+            Ok(())
+        })
 }
 
 fn upgrade(
@@ -153,6 +172,7 @@ fn upgrade(
     delta_cache: PathBuf,
     multi: MultiProgress,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
+    let server = server.join("arch/")?;
     let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
@@ -196,7 +216,7 @@ fn upgrade(
 
                         // delta download
                         let mut file_name = delta_cache.clone();
-                        file_name.push(format!("{newpkg}"));
+                        file_name.push(newpkg.to_string());
 
                         let delta = parsing::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
                         let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
@@ -209,7 +229,7 @@ fn upgrade(
                             .await
                             .unwrap();
 
-                        let url = format!("{server}/{oldpkg}/{newpkg}");
+                        let url = server.join(&format!("{oldpkg}/{newpkg}"))?;
 
                         let pg = util::do_download(
                             multi.clone(),
@@ -393,4 +413,17 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
     info!("patched {}", new.file_name().unwrap().to_string_lossy());
 
     Ok(comptime)
+}
+
+#[test]
+fn testurl() {
+    let url = Url::parse("http://bogen.moeh.re/").unwrap();
+    let url = url.join("arch/").unwrap();
+    let url = url.join("a/").unwrap();
+    assert_eq!(url.path(), "/arch/a/");
+
+    let url = Url::parse("http://bogen.moeh.re/").unwrap();
+    let url = url.join("arch").unwrap();
+    let url = url.join("a/").unwrap();
+    assert_eq!(url.path(), "/a/");
 }

@@ -218,7 +218,7 @@ impl DBCache {
             let mut response = sync
                 .client
                 .get(&uri)
-                // This is technically not HTTP-compliant, but idgaf
+                //FIXME: send http compliant header
                 .header(
                     reqwest::header::IF_MODIFIED_SINCE,
                     sync.last_sync.to_timestamp().to_string(),

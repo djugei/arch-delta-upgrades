@@ -1,6 +1,11 @@
-use std::{collections::HashMap, io::BufRead, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    io::{BufRead, Read},
+    path::PathBuf,
+    process::Command,
+};
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use bytesize::ByteSize;
 use http::{header::CONTENT_RANGE, StatusCode};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -8,7 +13,8 @@ use itertools::Itertools;
 use log::{debug, info};
 use memmap2::Mmap;
 use parsing::Package;
-use reqwest::Client;
+use reqwest::{Client, Url};
+use ruma_headers::ContentDisposition;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     pin,
@@ -32,7 +38,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
     client: Client,
     request_guard: G,
     dl_guard: G,
-    url: String,
+    url: Url,
     target: W,
 ) -> Result<ProgressBar, anyhow::Error> {
     let pg = ProgressBar::hidden()
@@ -51,7 +57,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         // get the server to generate the delta, this is expected to time out, possibly multiple times
         let mut delta = {
             loop {
-                let mut req = client.get(&url);
+                let mut req = client.get(url.clone());
                 if write_offset != 0 {
                     let range = format!("bytes={write_offset}-");
                     debug!("{pkg:?} sending range request {range}");
@@ -189,6 +195,97 @@ pub(crate) fn find_deltaupgrade_candidates(
         .collect();
     lines.sort_unstable_by_key(|(_, _, _, _, size)| std::cmp::Reverse(*size));
     Ok(lines)
+}
+
+pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {
+    info!("syncing {}", name);
+    let mut max = None;
+    for line in std::fs::read_dir("/var/lib/pacman/sync/")? {
+        let line = line?;
+        if !line.file_type()?.is_file() {
+            continue;
+        }
+        let filename = line.file_name();
+        let filename = filename.to_string_lossy();
+        if !filename.starts_with(&*name) {
+            continue;
+        }
+        // 3 kids of files in this folder:
+        // core.db | (symlink to) the database
+        // core-timestamp | version of the database
+        // core-timestamp-timestamp | patch
+        // we are only looking for core-timestamp
+        if filename.matches('-').count() != 1 {
+            continue;
+        }
+        let (_, ts) = filename.split_once('-').context("malformed filename")?;
+        let ts: u64 = ts.parse()?;
+        let ts = Some(ts);
+        if ts > max {
+            info!("selecting {ts:?} instead of {max:?}");
+            max = ts;
+        }
+    }
+    if let Some(old_ts) = max {
+        info!("upgrading {name} from {old_ts}");
+        //TODO arch vs archdb in url
+        let url = server.join(&format!("{name}/{old_ts}"))?;
+        debug!("{url}");
+        let response = client.get(url).send().await?;
+        debug!("{}", response.status());
+        assert!(response.status().is_success());
+        let header = response
+            .headers()
+            .get("content-disposition")
+            .context("missing content disposition header")?;
+        let patchname = ContentDisposition::try_from(header.as_bytes())?
+            .filename
+            .context("response has no filename")?;
+        let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
+        let new_ts: u64 = new_ts.parse()?;
+
+        info!("new ts for {name}: {new_ts}");
+        //TODO server side should be sending 304 for this
+        if new_ts != old_ts {
+            let patch = response.bytes().await?;
+            let patch = std::io::Cursor::new(patch);
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                info!("patching {name} from {old_ts} to {new_ts}");
+                let mut patch = zstd::Decoder::new(patch)?;
+
+                let old_p = format!("/var/lib/pacman/sync/{name}-{old_ts}");
+                let old = std::fs::File::open(&old_p)?;
+                let mut old = flate2::read::GzDecoder::new(old);
+                let mut oldv = Vec::new();
+                old.read_to_end(&mut oldv)?;
+                let mut old = std::io::Cursor::new(oldv);
+
+                let new_p = format!("/var/lib/pacman/sync/{name}-{new_ts}");
+                let new = std::fs::File::create(&new_p)?;
+                let mut new = flate2::write::GzEncoder::new(new, flate2::Compression::default());
+
+                ddelta::apply_chunked(&mut old, &mut new, &mut patch)?;
+
+                info!("finished patching {name} to {new_ts}");
+
+                info!("linking {new_p} to db");
+                let db_p = format!("/var/lib/pacman/sync/{name}.db");
+                std::fs::remove_file(&db_p)?;
+                std::os::unix::fs::symlink(new_p, db_p)?;
+
+                info!("deleting obsolete db {old_p}");
+                std::fs::remove_file(old_p)?;
+
+                Ok(())
+            })
+            .await??;
+        } else {
+            info!("{name}: old ({old_ts}) == new ({new_ts}), nothing to do");
+        }
+    } else {
+        todo!("no previous db found, do full timestamped download")
+    }
+    Ok(())
 }
 
 /// {package -> [(version, arch, trailer, path)]}
