@@ -63,7 +63,7 @@ fn main() {
     FALLBACK_MIRROR
         .set(get_env_or_fallback(
             "FALLBACK_MIRROR",
-            "http://europe.archive.pkgbuild.com/packages/.all/",
+            "https://europe.archive.pkgbuild.com/packages/.all/",
         ))
         .expect("init only once");
     CACHE_DIR
