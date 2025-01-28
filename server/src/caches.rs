@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use async_file_cache::{Cacheable, FileCache};
+use axum_extra::headers::{HeaderMapExt, IfModifiedSince};
 use parsing::{Delta, Package};
 use reqwest::Client;
 use thiserror::Error;
@@ -215,16 +216,10 @@ impl DBCache {
             let mirror = MIRROR.get().expect("initialized");
             let uri = format!("{mirror}{0}/os/x86_64/{0}.db", self.cache.state().name);
             debug!(uri = uri, "getting db");
-            let mut response = sync
-                .client
-                .get(&uri)
-                //FIXME: send http compliant header
-                .header(
-                    reqwest::header::IF_MODIFIED_SINCE,
-                    sync.last_sync.to_timestamp().to_string(),
-                )
-                .send()
-                .await?;
+
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.typed_insert(IfModifiedSince::from(sync.last_sync));
+            let mut response = sync.client.get(&uri).headers(headers).send().await?;
 
             if response.status() == reqwest::StatusCode::NOT_MODIFIED {
                 debug!(uri, "not modified");

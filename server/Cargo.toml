@@ -17,7 +17,7 @@ tokio-util = { version = "*", features = ["io"] }
 futures-util = "*"
 
 axum =  { version = "*", features = [] }
-reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+reqwest = { version = "*", default-features = false}
 axum-range = "*"
 axum-extra = "*"
 
