@@ -10,7 +10,7 @@ use bytesize::ByteSize;
 use http::{header::CONTENT_RANGE, StatusCode};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
-use log::{debug, info};
+use log::{debug, info, trace};
 use memmap2::Mmap;
 use parsing::Package;
 use reqwest::{Client, Url};
@@ -349,10 +349,10 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         let filename = line.file_name();
         let filename: String = filename.into_string().unwrap();
         if filename.ends_with(".delta") {
-            let (base, _ext) = filename.rsplit_once('.').unwrap();
-            let (_old, new) = base.rsplit_once(':').unwrap();
-            let (name, rest) = new.split_once('-').unwrap();
-            let (version, arch) = rest.rsplit_once('-').unwrap();
+            let (_old, new) = filename.rsplit_once(":to:").unwrap();
+            let pkg = Package::try_from(&*new).unwrap();
+            let (name, version, arch, trailer) = pkg.destructure();
+            assert_eq!(&*trailer, "delta");
             let len = line.metadata()?.len();
             deltas.insert((name.into(), version.into(), arch.into()), len);
         } else if filename.ends_with(".pkg.tar.zst") {
@@ -374,12 +374,20 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
             } else {
                 pkgs.insert((name, version, arch), len);
             }
+        } else if filename.ends_with(".sig") {
+            continue;
         } else {
+            debug!("unmatched filename {:?}", filename);
             continue;
         }
     }
     let mut unmatched = 0;
     for ((name, version, arch), len) in pkgs.drain() {
+        if log::log_enabled!(log::Level::Trace) {
+            if !deltas.contains_key(&(name.clone(), version.clone(), arch.clone())) {
+                trace!("pkg: {name} {version} {arch} unmatched");
+            }
+        }
         if let Some(((name, _version, _arch), dlen)) = deltas.remove_entry(&(name, version, arch)) {
             pairs
                 .entry(name)
@@ -394,6 +402,14 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         }
     }
     info!("{unmatched} packages did not have an associated delta");
+    info!("{} unmatched deltas", deltas.len());
+
+    if log::log_enabled!(log::Level::Debug) {
+        for ((name, version, arch), _dlen) in deltas.drain() {
+            debug!("delta: {name} {version} {arch} unmatched");
+        }
+    }
+
     let mut pairs = pairs
         .drain()
         .map(|(name, (count, len, dlen))| {
