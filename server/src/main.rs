@@ -162,6 +162,7 @@ async fn dbdelta(
     State(s): State<AppState>,
     Path((name, old)): Path<(Str, u64)>,
 ) -> Result<(StatusCode, HeaderMap, Body), (StatusCode, String)> {
+    //TODO: handle range request for 0 bytes with 0 byte response
     debug!("entering db fn with {} {:?}", name, old);
 
     let db = match name.as_ref() {
