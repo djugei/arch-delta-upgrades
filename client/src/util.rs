@@ -50,6 +50,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
     pin!(target);
     let mut target = pg.wrap_async_write(target);
     let mut tries = 8_u8;
+    //TODO: abstract retry logic
     'retry: loop {
         let guard = request_guard.as_ref().acquire().await?;
         pg.tick();
@@ -228,11 +229,8 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
     }
     if let Some(old_ts) = max {
         info!("upgrading {name} from {old_ts}");
-        //TODO arch vs archdb in url
         let url = server.join(&format!("{name}/{old_ts}"))?;
-        debug!("{url}");
         let response = client.get(url).send().await?;
-        debug!("{}", response.status());
         assert!(response.status().is_success());
         let header = response
             .headers()
@@ -244,13 +242,14 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
         let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
         let new_ts: u64 = new_ts.parse()?;
 
-        info!("new ts for {name}: {new_ts}");
+        debug!("new ts for {name}: {new_ts}");
         //TODO server side should be sending 304 for this
         if new_ts != old_ts {
+            // Patches are relatively small, can afford to just load it into memory
             let patch = response.bytes().await?;
             let patch = std::io::Cursor::new(patch);
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                info!("patching {name} from {old_ts} to {new_ts}");
+                debug!("patching {name} from {old_ts} to {new_ts}");
                 let mut patch = zstd::Decoder::new(patch)?;
 
                 let old_p = format!("/var/lib/pacman/sync/{name}-{old_ts}");
@@ -268,12 +267,12 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
 
                 info!("finished patching {name} to {new_ts}");
 
-                info!("linking {new_p} to db");
+                trace!("linking {new_p} to db");
                 let db_p = format!("/var/lib/pacman/sync/{name}.db");
                 std::fs::remove_file(&db_p)?;
                 std::os::unix::fs::symlink(new_p, db_p)?;
 
-                info!("deleting obsolete db {old_p}");
+                trace!("deleting obsolete db {old_p}");
                 std::fs::remove_file(old_p)?;
 
                 Ok(())
@@ -283,7 +282,32 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
             info!("{name}: old ({old_ts}) == new ({new_ts}), nothing to do");
         }
     } else {
-        todo!("no previous db found, do full timestamped download")
+        info!("no previous db found, do full timestamped download");
+        //TODO: maybe share this block between the two branches
+        let url = server.join(&format!("{name}"))?;
+        let mut response = client.get(url).send().await?;
+        assert!(response.status().is_success());
+        let header = response
+            .headers()
+            .get("content-disposition")
+            .context("missing content disposition header")?;
+        let patchname = ContentDisposition::try_from(header.as_bytes())?
+            .filename
+            .context("response has no filename")?;
+        let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
+        let new_ts: u64 = new_ts.parse()?;
+
+        let new_p = format!("/var/lib/pacman/sync/{name}-{new_ts}");
+        let mut new = tokio::fs::File::create(&new_p).await?;
+        while let Some(chunk) = response.chunk().await? {
+            new.write_all(&chunk).await?;
+        }
+
+        trace!("linking {new_p} to db");
+        let db_p = format!("/var/lib/pacman/sync/{name}.db");
+        std::fs::remove_file(&db_p)?;
+        std::os::unix::fs::symlink(new_p, db_p)?;
+        info!("finished downloading {name} at {new_ts}");
     }
     Ok(())
 }
