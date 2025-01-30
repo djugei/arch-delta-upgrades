@@ -282,7 +282,7 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
             info!("{name}: old ({old_ts}) == new ({new_ts}), nothing to do");
         }
     } else {
-        info!("no previous db found, do full timestamped download");
+        info!("no timestamped db found, do full download");
         //TODO: maybe share this block between the two branches
         let url = server.join(&format!("{name}"))?;
         let mut response = client.get(url).send().await?;
@@ -303,9 +303,15 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
             new.write_all(&chunk).await?;
         }
 
-        trace!("linking {new_p} to db");
         let db_p = format!("/var/lib/pacman/sync/{name}.db");
-        std::fs::remove_file(&db_p)?;
+        trace!("linking {new_p} to {db_p}");
+        let res = std::fs::remove_file(&db_p);
+        if let Err(e) = res {
+            // Not found is fine, just means the db does not exist yet
+            if e.kind() != std::io::ErrorKind::NotFound {
+                bail!(e);
+            }
+        }
         std::os::unix::fs::symlink(new_p, db_p)?;
         info!("finished downloading {name} at {new_ts}");
     }
