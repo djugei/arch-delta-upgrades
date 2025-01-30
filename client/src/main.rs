@@ -26,6 +26,10 @@ enum Commands {
         server: Url,
         #[arg(default_values_t = [Str::from("linux"), Str::from("blas"), Str::from("lapack")])]
         blacklist: Vec<Box<str>>,
+        /// Use pacman for syncing the databases,
+        /// if unset/by default uses delta-enabled sync.
+        #[arg(long)]
+        pacman_sync: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: target directory/rootless mode
@@ -72,7 +76,11 @@ enum Commands {
 }
 
 fn main() {
-    // set up a logger that does not conflict with progress bars
+    //TODO: if set use the environment variable, else check the command line for -v flags (-v=debug -vv=trace -q=warn -qq=error).
+    //      make a struct Cmd { verbosity: u8, task: Command}.
+    //      Can utilize clap_verbosity_flag for this.
+    //
+    // Set up a logger that does not conflict with progress bars
     let logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
     let multi = MultiProgress::new();
     let level = logger.filter();
@@ -95,9 +103,26 @@ fn main() {
             let orig = zstd::decode_all(orig).unwrap();
             apply_patch(&orig, &patch, &new, pb).unwrap();
         }
-        Commands::Upgrade { server, blacklist } => {
-            info!("syncing databases");
-            sync(server.clone(), multi.clone()).unwrap();
+        Commands::Upgrade {
+            server,
+            pacman_sync,
+            blacklist,
+        } => {
+            if pacman_sync {
+                info!("running pacman -Sy");
+                let exit = Command::new("pacman")
+                    .arg("-Sy")
+                    .spawn()
+                    .expect("could not run pacman -Sy")
+                    .wait()
+                    .expect("error waiting for pacman -Sy");
+                if !exit.success() {
+                    panic!("pacman -Sy failed, aborting");
+                }
+            } else {
+                info!("syncing databases");
+                sync(server.clone(), multi.clone()).unwrap();
+            }
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
             let (deltasize, newsize, comptime) = match upgrade(server, blacklist, cachepath, multi) {
@@ -176,6 +201,8 @@ fn upgrade(
     let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
+    //TODO set up runtime in main function
+    //TODO split this into multiple functions, at least main-dl and sig-dl
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -274,6 +301,8 @@ fn upgrade(
                         Ok::<_, anyhow::Error>((deltasize, newsize, comptime))
                     };
 
+                    //TODO: gracefully exit if signature can not be gotten from mirror
+                    // for example cause it uses https
                     let sigfut = async {
                         let mut sigfile = delta_cache.clone();
                         sigfile.push(format!("{newpkg}.sig"));
