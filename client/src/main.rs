@@ -197,7 +197,6 @@ fn upgrade(
     delta_cache: PathBuf,
     multi: MultiProgress,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    let server = server.join("arch/")?;
     let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
@@ -256,7 +255,9 @@ fn upgrade(
                             .await
                             .unwrap();
 
-                        let url = server.join(&format!("{oldpkg}/{newpkg}"))?;
+                        // Wish there was a more precise way to do this,
+                        // right now join does different things if the joined part starts with a / or contains a :
+                        let url = server.join(&format!("/arch/{oldpkg}/{newpkg}"))?;
 
                         let pg = util::do_download(
                             multi.clone(),
