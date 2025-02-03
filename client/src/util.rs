@@ -145,6 +145,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
 
 pub(crate) fn find_deltaupgrade_candidates(
     blacklist: &[Str],
+    fuz: bool,
 ) -> Result<Vec<(String, Package, Package, Mmap, u64)>, anyhow::Error> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let packageversions = build_package_versions().expect("io error on local disk");
@@ -161,15 +162,20 @@ pub(crate) fn find_deltaupgrade_candidates(
                 return None;
             }
             if let Some((oldpkg, oldpath)) = newest_cached(&packageversions, &pkg.get_name()).or_else(|| {
-                let (alternative, _) = packageversions
-                    .keys()
-                    .map(|name| (name, strsim::levenshtein(name, pkg.get_name())))
-                    .filter(|(_name, sim)| sim <= &2)
-                    .min()?;
-                let prompt =
-                    format!("could not find cached package for {name}, {alternative} is similar, use that instead?");
-                if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
-                    newest_cached(&packageversions, alternative)
+                if fuz {
+                    let (alternative, _) = packageversions
+                        .keys()
+                        .map(|name| (name, strsim::levenshtein(name, pkg.get_name())))
+                        .filter(|(_name, sim)| sim <= &2)
+                        .min()?;
+                    let prompt = format!(
+                        "could not find cached package for {name}, {alternative} has a similar name, use that instead?"
+                    );
+                    if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
+                        newest_cached(&packageversions, alternative)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -228,7 +234,7 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
         }
     }
     if let Some(old_ts) = max {
-        info!("upgrading {name} from {old_ts}");
+        debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
         let response = client.get(url).send().await?;
         assert!(response.status().is_success());

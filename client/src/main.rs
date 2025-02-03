@@ -30,6 +30,10 @@ enum Commands {
         /// if unset/by default uses delta-enabled sync.
         #[arg(long)]
         pacman_sync: bool,
+        /// Disable fuzzy search if an exact package can not be found.
+        /// This might find renames like -qt5 to -qt6
+        #[arg(long)]
+        no_fuz: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: target directory/rootless mode
@@ -54,7 +58,14 @@ enum Commands {
     ///
     /// If you are doing a full sysupgrade try the upgrade subcommand for more comfort.
     #[command(verbatim_doc_comment)]
-    Download { server: Url, delta_cache: PathBuf },
+    Download {
+        server: Url,
+        delta_cache: PathBuf,
+        /// Disable fuzzy search if an exact package can not be found.
+        /// This might find renames like -qt5 to -qt6
+        #[arg(long)]
+        no_fuz: bool,
+    },
     /// Calculate and display some statistics about effectiveness of the delta-encoding
     Stats {
         /// Number of best/worst entries to display
@@ -107,6 +118,7 @@ fn main() {
             server,
             pacman_sync,
             blacklist,
+            no_fuz,
         } => {
             if pacman_sync {
                 info!("running pacman -Sy");
@@ -125,7 +137,7 @@ fn main() {
             }
 
             let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-            let (deltasize, newsize, comptime) = match upgrade(server, blacklist, cachepath, multi) {
+            let (deltasize, newsize, comptime) = match upgrade(server, blacklist, cachepath, multi, !no_fuz) {
                 Ok((d, n, c)) => (d, n, c),
                 Err(e) => {
                     error!("{e}");
@@ -162,9 +174,13 @@ fn main() {
 
             info!("have a great day!");
         }
-        Commands::Download { server, delta_cache } => {
+        Commands::Download {
+            server,
+            delta_cache,
+            no_fuz,
+        } => {
             std::fs::create_dir_all(&delta_cache).unwrap();
-            upgrade(server, vec![], delta_cache, multi).unwrap();
+            upgrade(server, vec![], delta_cache, multi, !no_fuz).unwrap();
         }
         Commands::Sync { server } => {
             sync(server, multi).unwrap();
@@ -196,8 +212,9 @@ fn upgrade(
     blacklist: Vec<Str>,
     delta_cache: PathBuf,
     multi: MultiProgress,
+    fuz: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist)?;
+    let upgrade_candidates = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
     //TODO set up runtime in main function
