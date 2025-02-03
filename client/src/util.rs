@@ -486,7 +486,6 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
             if dlen < len { "saved" } else { "wasted" }
         )
     }
-    // todo: use heap instead
     pairs.sort_by_key(|e| e.5 * e.2);
     info!("top size saves");
     for (i, (ratio, name, count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
