@@ -339,8 +339,7 @@ pub enum ContentDispositionParseError {
 ///
 /// This type can hold an arbitrary [`TokenString`]. To build this with a custom value, convert it
 /// from a `TokenString` with `::from()` / `.into()`. To check for values that are not available as
-/// a documented variant here, use its string representation, obtained through
-/// [`.as_str()`](Self::as_str()).
+/// a documented variant here, use its string representation.
 ///
 /// Comparisons with other string types are done case-insensitively.
 ///
@@ -366,7 +365,7 @@ impl fmt::Display for ContentDispositionType {
         match self {
             ContentDispositionType::Inline => f.write_str("inline"),
             ContentDispositionType::Attachment => f.write_str("attachment"),
-            ContentDispositionType::_Custom(token_string) => f.write_str(&*token_string.0),
+            ContentDispositionType::_Custom(token_string) => f.write_str(&token_string.0),
         }
     }
 }
@@ -463,7 +462,7 @@ impl AsRef<str> for TokenString {
 
 impl<'a> PartialEq<&'a str> for TokenString {
     fn eq(&self, other: &&'a str) -> bool {
-        (&*self.0).eq(*other)
+        (*self.0).eq(*other)
     }
 }
 
