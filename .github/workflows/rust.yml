@@ -1,10 +1,6 @@
 name: Rust
 
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+on: [push, pull_request]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,7 +12,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: get nightly toolchain
+        id: toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: save target directory
+        id: target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{runner.os}}-${{steps.toolchain.outputs.cachekey}}
       - name: Build
         run: cargo +nightly build --verbose
       - name: Run tests
