@@ -7,10 +7,10 @@ The tradeoff is increased compute.
 
 ## Project Structure
 See the respective readme-files for more information.
-### [server](./server)
+### [deltaserver](./server)
 Generates and serves deltas, you probably will not need to run this.
 
-### [client](./client)
+### [deltaclient](./client)
 Requests, downloads, and applies deltas. Run this.
 
 ### [async_file_cache](./async_file_cache)
