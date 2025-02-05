@@ -402,7 +402,7 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
     let patch = OpenOptions::new().write(true).create(true).open(patch).unwrap();
     let mut patch = zstd::Encoder::new(patch, 22)?;
 
-    ddelta::generate_chunked(&mut orig, &mut new, &mut patch, None, |_| {}).unwrap();
+    ddelta::generate_chunked(&mut orig, &mut new, &mut patch, None, |p| debug!("{p:?}")).unwrap();
     patch.do_finish()?;
 
     Ok(())
