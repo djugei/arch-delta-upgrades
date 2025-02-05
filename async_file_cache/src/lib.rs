@@ -138,7 +138,7 @@ impl<State: CacheState> FileCache<State> {
                             } else {
                                 debug!("generating {:?}", path);
                                 let (tx, rx) = tokio::sync::watch::channel(());
-                                entry.insert_kv(key.clone(), rx);
+                                entry.insert_clone(rx);
 
                                 let mut part_path = path.clone();
                                 part_path.as_mut_os_string().push(OsString::from(".part"));
