@@ -7,27 +7,34 @@ use hashbrown::HashMap;
 use tokio::io::AsyncSeekExt;
 use tokio::{fs::File, sync::Mutex, sync::Semaphore};
 
-pub trait Cacheable {
-    // todo: get rid of the Clone bound, it seems to not be strictly nescesary, the entry-api is just a bit unwieldy that way
+/// State of the [FileCache]
+/// you can store identifiers for having different instances of the same kind of cache
+/// or HTTP-clients for connection reuse in here.
+pub trait CacheState {
+    /// Identifies the value to be generated,
+    /// Could for example be a package name or a URL
     type Key: Eq + Hash + Clone;
     type Error;
 
     /// Turns the Key into a path where the computation is cached
-    fn key_to_path(&self, k: &Self::Key) -> PathBuf;
+    fn key_to_path(&self, key: &Self::Key) -> PathBuf;
 
-    /// does the expensive operation.
-    /// should not block, either on io or on compute.
-    /// use async_runtime::spawn for calculation
-    /// and async io for io.
-    /// is expected to serialize the computed value to the provided file
-    /// should not panic but cleanup code is in place.
-    fn gen_value(&self, k: &Self::Key, f: File) -> impl Future<Output = Result<File, Self::Error>>;
+    /// Generate your Value identified by the key,
+    /// write it into file.
+    ///
+    /// You May panic.
+    /// Panics are propagated and will probably crash the program,
+    /// but the cache state should be unaffected.
+    ///
+    /// Errors and panics are assumed to be spurious and will be retried by the next task attempting to access the file.
+    fn gen_value(&self, key: &Self::Key, file: File) -> impl Future<Output = Result<File, Self::Error>>;
 }
+
 /**
     File-Backed Cache:
-    Execute an expensive operation to generate a Resource and store the results in a file on disk.
-    If the same resource is requested again it will be produced from disk.
-    If the same resource is requested while it is also being generated it will be generated only
+    Execute an expensive operation to generate a file and store it in on disk.
+    If the same file is requested again it will be read from disk.
+    If the same file is requested while being generated it will be generated only
     once (dog-piling is prevented).
 
     It is possible to set a max parallelism level.
@@ -35,20 +42,18 @@ pub trait Cacheable {
 */
 pub struct FileCache<State>
 where
-    State: Cacheable,
+    State: CacheState,
 {
     in_flight: tokio::sync::Mutex<HashMap<State::Key, tokio::sync::watch::Receiver<()>>>,
     state: State,
     max_para: Option<Semaphore>,
 }
 
-impl<State: Cacheable> FileCache<State> {
-    /**
-     * # Parameters:
-     * max_para: maximum number of expensive operations in flight at the same time
-     * Be mindful when crating multiple instances based on the same Cacheable.
-     * They will access the same folder and interfere with each others operations.
-     */
+impl<State: CacheState> FileCache<State> {
+    /// Be mindful when crating multiple instances based on the same CacheState.
+    /// They will access the same folder and interfere with each others operations.
+    /// # Parameters:
+    /// max_para: maximum number of generating operations in flight.
     pub fn new(init_state: State, max_para: Option<usize>) -> Self {
         let max_para = max_para.map(Semaphore::new);
         let in_flight = Mutex::new(HashMap::new());
@@ -63,6 +68,12 @@ impl<State: Cacheable> FileCache<State> {
         &self.state
     }
 
+    /// Open an already generated file or,
+    /// in case it does not exist yet,
+    /// generate it.
+    ///
+    /// The outer result is from io operations conducted by FileCache,
+    /// the inner one is for [StateCache::Error].
     pub async fn get_or_generate(&self, key: State::Key) -> std::io::Result<Result<File, State::Error>> {
         let mut oo = tokio::fs::OpenOptions::new();
         let read = oo.read(true).write(false).create(false);
@@ -80,24 +91,24 @@ impl<State: Cacheable> FileCache<State> {
                     debug!("waiting {:?}", path);
                     match e.changed().await {
                         Ok(()) => {
-                            // weird but ok(ok()))
-                            // todo: only open the file once, ever
+                            //TODO: only open the file once, ever
                             // this is a slight race-condition where the file could be deleted from the fs in between this and the previous line currently
+                            // weird but ok(ok()))
                             return Ok(Ok(read.open(path).await?));
                         }
                         Err(_) => {
-                            // sender has been dropped which means either the generation function
-                            // paniced internally or the whole future has been dropped in flight.
-                            // we need to remove the entry and file and try again.
+                            // Sender has been dropped which means either the generation function
+                            // panicked internally or the whole future has been dropped in flight.
+                            // We need to remove the entry and file and try again.
 
-                            // fixme: doesn't this file need to be deleted while locking the hashmap?
+                            //FIXME: doesn't this file need to be deleted while locking the hashmap?
                             if let Err(e) = tokio::fs::remove_file(path).await {
-                                // not found is fine thats what we want
+                                // Not found is fine that is what we want
                                 if e.kind() != ErrorKind::NotFound {
                                     return Err(e);
                                 }
                             };
-                            // i hope this locking logic is sound:
+                            // I hope this locking logic is sound:
                             // if multiple threads detect a crashed channel then only the first
                             // once has an equal channel
                             // other ones get either an empty entry or a new entry with a different
@@ -127,7 +138,7 @@ impl<State: Cacheable> FileCache<State> {
                             } else {
                                 debug!("generating {:?}", path);
                                 let (tx, rx) = tokio::sync::watch::channel(());
-                                entry.insert_clone(rx);
+                                entry.insert_kv(key.clone(), rx);
 
                                 let mut part_path = path.clone();
                                 part_path.as_mut_os_string().push(OsString::from(".part"));
@@ -160,13 +171,13 @@ impl<State: Cacheable> FileCache<State> {
                                         return Ok(Err(e));
                                     }
                                 };
-                                // operation succeeded, we move the .part file to its permanent place
+                                // Operation succeeded, we move the part file to its permanent place
                                 tokio::fs::rename(part_path, &path).await?;
                                 let file = read.open(path).await?;
 
                                 drop(perm);
 
-                                // this can not panic as we hold a reciever ourselves
+                                // This can not panic as we hold a receiver ourselves
                                 tx.send(()).expect("threading failure (snd)");
                                 self.in_flight.lock().await.remove(&key);
                                 return Ok(Ok(file));
@@ -186,7 +197,7 @@ fn cache_simple() {
     tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init();
 
     struct TestState;
-    impl Cacheable for TestState {
+    impl CacheState for TestState {
         type Key = String;
         type Error = std::io::Error;
 

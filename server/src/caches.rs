@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use async_file_cache::{Cacheable, FileCache};
+use async_file_cache::{CacheState, FileCache};
 use axum_extra::headers::{HeaderMapExt, IfModifiedSince};
 use parsing::{Delta, Package};
 use reqwest::Client;
@@ -28,7 +28,7 @@ pub enum DownloadError {
 }
 
 pub struct PackageCache(pub Client);
-impl Cacheable for PackageCache {
+impl CacheState for PackageCache {
     type Key = Package;
     type Error = DownloadError;
 
@@ -78,7 +78,7 @@ pub enum DeltaError {
 
 pub struct DeltaCache(pub FileCache<PackageCache>);
 
-impl Cacheable for DeltaCache {
+impl CacheState for DeltaCache {
     type Key = Delta;
     type Error = DeltaError;
 
@@ -246,7 +246,7 @@ impl DBCache {
     }
 }
 
-impl Cacheable for DBCacheable {
+impl CacheState for DBCacheable {
     // old, local
     type Key = (u64, u64);
     type Error = DeltaError;
