@@ -422,16 +422,44 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
     //let patchlen = patch.metadata()?.len();
     let mut patch = zstd::Decoder::new(patch)?;
 
+    // There is one arch maintainer that sometimes changes the compression options within the PKGBUILD
+    // for minor compression gains, usually in the order of a few bytes to a kilobyte.
+    // Cost is this special casing and higher memory and compute costs for compression _and_ decompression.
+    // tbh besides this code being annoying to add
+    // I am a little confused about there being a big mailing list thread with research and data
+    // about the specific compression parameters and space time trade-offs.
+    // Which then gets overridden without so much as a mention in the commit message.
+    // This is also the only time the compression parameters are altered.
+    // That's pretty hefty.
+    let filename = new.file_name().unwrap().to_string_lossy();
+    let pkg = parsing::Package::try_from(filename.as_ref()).unwrap();
+    let mut command = Command::new("zstd");
+    if [
+        "rust",
+        "lib32-rust-libs",
+        "rust-musl",
+        "rust-aarch64-gnu",
+        "rust-aarch64-musl",
+        "rust-wasm",
+        "rust-src",
+        "js91",
+        "js115",
+        "js128",
+    ]
+    .contains(&pkg.get_name())
+    {
+        debug!("using alternative zstd compression parameters for {}", pkg.get_name());
+        command.args(["-c", "-T0", "--ultra", "-20", "--long", "-"]);
+    } else {
+        command.args(["-c", "-T0", "--ultra", "-20", "-"]);
+    };
+
     // fixme: while the patches are perfect the compression is not bit identical
     // can try to set parallelity in zstd lib?
     // cat patched.tar | zstd -c -T0 --ultra -20 > patched.tar.zstd
     let comptime;
     {
-        let mut z = Command::new("zstd")
-            .args(["-c", "-T0", "--ultra", "-20", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
+        let mut z = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
 
         let mut stdin = z.stdin.take().unwrap();
         let mut stdout = z.stdout.take().unwrap();
