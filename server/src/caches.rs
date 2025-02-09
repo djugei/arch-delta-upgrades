@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use async_file_cache::{CacheState, FileCache};
-use axum_extra::headers::{HeaderMapExt, IfModifiedSince};
+use axum_extra::headers::{HeaderMapExt, IfModifiedSince, LastModified};
 use parsing::{Delta, Package};
 use reqwest::Client;
 use thiserror::Error;
@@ -221,7 +221,16 @@ impl DBCache {
             headers.typed_insert(IfModifiedSince::from(sync.last_sync));
             let mut response = sync.client.get(&uri).headers(headers).send().await?;
 
-            if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            // (some?) mirrors just happily start sending data even if the file is older.
+            // Check the response header and abort.
+            let is_cached = response
+                .headers()
+                .typed_get::<LastModified>()
+                .map(|modified| SystemTime::from(modified) <= sync.last_sync)
+                .unwrap_or(false);
+            let pseudo_not_modified = is_cached && response.status() == reqwest::StatusCode::OK;
+
+            if pseudo_not_modified || response.status() == reqwest::StatusCode::NOT_MODIFIED {
                 debug!(uri, "not modified");
                 // No updates in the last interval
             } else if response.status() == reqwest::StatusCode::OK {

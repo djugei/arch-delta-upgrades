@@ -495,10 +495,13 @@ fn testurl() {
     let url = Url::parse("http://bogen.moeh.re/").unwrap();
     let url = url.join("arch/").unwrap();
     let url = url.join("a/").unwrap();
+    dbg!(&url);
     assert_eq!(url.path(), "/arch/a/");
 
     let url = Url::parse("http://bogen.moeh.re/").unwrap();
     let url = url.join("arch").unwrap();
     let url = url.join("a/").unwrap();
+    dbg!(&url);
     assert_eq!(url.path(), "/a/");
+    dbg!(&url.join("file"));
 }
