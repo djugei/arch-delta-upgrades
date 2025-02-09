@@ -146,20 +146,20 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
 pub(crate) fn find_deltaupgrade_candidates(
     blacklist: &[Str],
     fuz: bool,
-) -> Result<Vec<(String, Package, Package, Mmap, u64)>, anyhow::Error> {
+) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<String>), anyhow::Error> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let packageversions = build_package_versions().expect("io error on local disk");
-    let mut lines: Vec<_> = upgrades
+    let (mut delta_upgrades, downloads): (Vec<_>, Vec<_>) = upgrades
         .lines()
         .map(|l| l.expect("pacman abborted output???"))
         .filter(|l| !l.starts_with("file"))
-        .filter_map(|line| {
+        .map(|line| {
             let (_, filename) = line.rsplit_once('/').unwrap();
             let pkg = Package::try_from(filename).unwrap();
             let name = pkg.get_name();
             if (&blacklist).into_iter().any(|e| **e == *name) {
                 info!("{name} is blacklisted, skipping");
-                return None;
+                return Err(line);
             }
             if let Some((oldpkg, oldpath)) = newest_cached(&packageversions, &pkg.get_name()).or_else(|| {
                 if fuz {
@@ -193,15 +193,15 @@ pub(crate) fn find_deltaupgrade_candidates(
                     debug!("using default size for {name}");
                     default_size
                 });
-                Some((line, pkg, oldpkg, oldfile, (dec_size as u64)))
+                Ok((line, pkg, oldpkg, oldfile, (dec_size as u64)))
             } else {
                 info!("no cached package found, leaving {} for pacman", filename);
-                None
+                Err(line)
             }
         })
-        .collect();
-    lines.sort_unstable_by_key(|(_, _, _, _, size)| std::cmp::Reverse(*size));
-    Ok(lines)
+        .partition_result();
+    delta_upgrades.sort_unstable_by_key(|(_, _, _, _, size)| std::cmp::Reverse(*size));
+    Ok((delta_upgrades, downloads))
 }
 
 pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {
