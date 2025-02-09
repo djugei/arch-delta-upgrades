@@ -231,8 +231,11 @@ impl DBCache {
             let pseudo_not_modified = is_cached && response.status() == reqwest::StatusCode::OK;
 
             if pseudo_not_modified || response.status() == reqwest::StatusCode::NOT_MODIFIED {
-                debug!(uri, "not modified");
                 // No updates in the last interval
+                debug!(uri, "not modified");
+                if pseudo_not_modified {
+                    debug!(uri, "mirror has bad http compliance");
+                }
             } else if response.status() == reqwest::StatusCode::OK {
                 // db has been updated, update our local copy
                 let path = now.to_path(&self.cache.state().name);
