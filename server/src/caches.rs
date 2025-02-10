@@ -170,15 +170,17 @@ struct DBCacheSync {
 
 impl DBCache {
     pub fn new(name: Str, client: Client) -> Result<Self, DownloadError> {
+        let ts = parsing::find_latest_db(&*name, crate::get_db_path())?;
+        let ts = ts.unwrap_or(0);
+        let ts = SystemTimeExt::from_timestamp(ts);
         let s = DBCache {
             cache: FileCache::new(DBCacheable { name }, None),
             sync: Mutex::new(DBCacheSync {
-                last_check: SystemTime::UNIX_EPOCH,
-                last_sync: SystemTime::UNIX_EPOCH,
+                last_check: ts,
+                last_sync: ts,
                 client,
             }),
         };
-        //TODO: search for most recent db on disk.
         Ok(s)
     }
 
