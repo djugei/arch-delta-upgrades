@@ -213,6 +213,10 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
         let url = server.join(&format!("{name}/{old_ts}"))?;
         let response = client.get(url).send().await?;
         assert!(response.status().is_success());
+        if response.status() == StatusCode::NOT_MODIFIED {
+            info!("{name} is unchanged");
+            return Ok(());
+        }
         let header = response
             .headers()
             .get("content-disposition")

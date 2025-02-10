@@ -182,18 +182,23 @@ async fn dbdelta(
     let mut h = HeaderMap::new();
     h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
     info!(name = name, old = old, "dbdelta requested for",);
-    let (stamp, patch) = db.get_delta_to(old).await.expect("dbdelta generating failed");
-    //TODO handle 304 (unchanged) case
-    //TODO the old version the client has may have already been expunged, thats a somewhat common case so better handle it gracefully.
+    match db.get_delta_to(old).await {
+        Ok((stamp, patch)) => {
+            h.insert(
+                axum::http::header::CONTENT_DISPOSITION,
+                axum::http::HeaderValue::from_str(
+                    format!("attachment; filename=\"{}-{}-{}\"", name, old, stamp).as_str(),
+                )
+                .unwrap(),
+            );
 
-    h.insert(
-        axum::http::header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_str(format!("attachment; filename=\"{}-{}-{}\"", name, old, stamp).as_str())
-            .unwrap(),
-    );
-
-    let body = Body::from_stream(ReaderStream::new(patch));
-    Ok((StatusCode::OK, h, body))
+            let body = Body::from_stream(ReaderStream::new(patch));
+            Ok((StatusCode::OK, h, body))
+        }
+        Err(caches::DeltaError::Identical) => Err((StatusCode::NOT_MODIFIED, "{name}-{ts} is up-to-date".into())),
+        //TODO the old version the client has may have already been expunged, that is a somewhat common case so better handle it gracefully.
+        Err(e) => panic!("db delta generation failed: {e}"),
+    }
 }
 
 async fn gen_delta(

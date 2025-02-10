@@ -74,6 +74,8 @@ pub enum DeltaError {
     Io(#[from] std::io::Error),
     #[error("generation error: {0}")]
     DeltaGen(#[from] ddelta::DiffError),
+    #[error("identical versions")]
+    Identical,
 }
 
 pub struct DeltaCache(pub FileCache<PackageCache>);
@@ -195,6 +197,9 @@ impl DBCache {
     /// Updates internally then returns a delta from old to the newest available db
     pub async fn get_delta_to(&self, old: u64) -> Result<(u64, File), DeltaError> {
         let ts = self.update().await?.to_timestamp();
+        if ts == old {
+            return Err(DeltaError::Identical);
+        }
         let patch = self.cache.get_or_generate((old, ts)).await??;
         Ok((ts, patch))
     }
