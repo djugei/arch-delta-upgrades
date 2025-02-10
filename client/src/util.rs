@@ -205,34 +205,9 @@ pub(crate) fn find_deltaupgrade_candidates(
 }
 
 pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {
+    //TODO use the same logic as the main delta downloads, including retries and progress bars
     info!("syncing {}", name);
-    let mut max = None;
-    for line in std::fs::read_dir("/var/lib/pacman/sync/")? {
-        let line = line?;
-        if !line.file_type()?.is_file() {
-            continue;
-        }
-        let filename = line.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.starts_with(&*name) {
-            continue;
-        }
-        // 3 kids of files in this folder:
-        // core.db | (symlink to) the database
-        // core-timestamp | version of the database
-        // core-timestamp-timestamp | patch
-        // we are only looking for core-timestamp
-        if filename.matches('-').count() != 1 {
-            continue;
-        }
-        let (_, ts) = filename.split_once('-').context("malformed filename")?;
-        let ts: u64 = ts.parse()?;
-        let ts = Some(ts);
-        if ts > max {
-            info!("selecting {ts:?} instead of {max:?}");
-            max = ts;
-        }
-    }
+    let max = find_latest_db(&name, "/var/lib/pacman/sync/")?;
     if let Some(old_ts) = max {
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
@@ -322,6 +297,37 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
         info!("finished downloading {name} at {new_ts}");
     }
     Ok(())
+}
+
+fn find_latest_db<P: AsRef<std::path::Path>>(name: &Box<str>, path: P) -> Result<Option<u64>, anyhow::Error> {
+    let mut max = None;
+    for line in std::fs::read_dir(path)? {
+        let line = line?;
+        if !line.file_type()?.is_file() {
+            continue;
+        }
+        let filename = line.file_name();
+        let filename = filename.to_string_lossy();
+        if !filename.starts_with(&**name) {
+            continue;
+        }
+        // 3 kinds of files in this folder:
+        // core.db | (symlink to) the database
+        // core-timestamp | version of the database
+        // core-timestamp-timestamp | patch
+        // we are only looking for core-timestamp
+        if filename.matches('-').count() != 1 {
+            continue;
+        }
+        let (_, ts) = filename.split_once('-').context("malformed filename")?;
+        let ts: u64 = ts.parse()?;
+        let ts = Some(ts);
+        if ts > max {
+            trace!("selecting {ts:?} instead of {max:?}");
+            max = ts;
+        }
+    }
+    Ok(max)
 }
 
 /// {package -> [(version, arch, trailer, path)]}
