@@ -176,19 +176,21 @@ pub(crate) fn find_deltaupgrade_candidates(
                     None
                 }
             }) {
-                // try to find the decompressed size for better progress monitoring
+                // Try to find the decompressed size for better progress monitoring
                 let oldfile = std::fs::File::open(oldpath).expect("io error on local disk");
-                // safety: i promise to not open the same file as writable at the same time
+                // Safety: I promise to not open the same file as writable at the same time
                 let oldfile = unsafe { Mmap::map(&oldfile).expect("mmap failed") };
-                // 16 megabytes seems like an ok average size
-                // todo: find the actual average size of a decompressed package
-                let default_size = 16 * 1024 * 1024;
-                // due to pacman packages being compressed in streaming mode
+                // Testing reveals the average size to be 17.2 MB
+                let default_size = 17 * 1024 * 1024;
+                // Due to pacman packages being compressed in streaming mode
                 // zstd does not have an exact decompressed size and heavily overestimates
-                let dec_size = zstd::bulk::Decompressor::upper_bound(&oldfile).unwrap_or_else(|| {
-                    debug!("using default size for {name}");
-                    default_size
-                });
+                let dec_size = zstd::bulk::Decompressor::upper_bound(&oldfile)
+                    // The real ratio is 18/47.4, 4/11 is close enough
+                    .map(|s| (s as u64) * 4 / 11)
+                    .unwrap_or_else(|| {
+                        debug!("using default size for {name}");
+                        default_size
+                    });
                 Ok((line, pkg, oldpkg, oldfile, (dec_size as u64)))
             } else {
                 info!("no cached package found, leaving {} for pacman", filename);
@@ -486,4 +488,74 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     info!("saved {:.2}% of bandwidth", (1. - ratio) * 100.);
 
     Ok(())
+}
+
+#[test]
+#[ignore = "expensive to run, needs actual packages"]
+fn test_dec_sizes() {
+    use std::io::Seek;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dirents: Vec<_> = std::fs::read_dir(PACMAN_CACHE)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|line| line.file_type().unwrap().is_file() && line.file_name().as_bytes().ends_with(b".tar.zst"))
+        .collect();
+
+    let mut actual_size = 0u64;
+    let mut guessed_size = 0u64;
+    let mut count = 0u64;
+    let mut compressed = 0u64;
+    std::thread::scope(|s| {
+        let (ab, cd) = dirents.split_at(dirents.len() / 2);
+        let (a, b) = ab.split_at(ab.len() / 2);
+        let (c, d) = cd.split_at(cd.len() / 2);
+
+        let a = s.spawn(|| calc_stuff(a));
+        let b = s.spawn(|| calc_stuff(b));
+        let c = s.spawn(|| calc_stuff(c));
+        let d = s.spawn(|| calc_stuff(d));
+
+        for j in [a, b, c, d].into_iter() {
+            let (a_s, g_s, c, comp) = j.join().unwrap();
+            actual_size += a_s;
+            guessed_size += g_s;
+            count += c;
+            compressed += comp;
+        }
+    });
+
+    fn calc_stuff(entries: &[std::fs::DirEntry]) -> (u64, u64, u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let mut buf = vec![0; 2048];
+        let mut actual_size = 0u64;
+        let mut guessed_size = 0u64;
+        let mut count = 0u64;
+        let mut compressed = 0u64;
+        for line in entries {
+            compressed += line.metadata().unwrap().size();
+            let mut file = std::fs::File::open(line.path()).expect("io error on local disk");
+            let mmapfile = unsafe { Mmap::map(&file).expect("mmap failed") };
+            guessed_size += zstd::bulk::Decompressor::upper_bound(&mmapfile).unwrap() as u64;
+            file.rewind().unwrap();
+            let mut dec = zstd::Decoder::new(file).unwrap();
+            while let Ok(read) = dec.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                actual_size += read as u64;
+            }
+            count += 1;
+        }
+
+        (actual_size, guessed_size, count, compressed)
+    }
+
+    println!("real size is {}", ByteSize::b(actual_size));
+    println!("guess is {}", ByteSize::b(guessed_size));
+    println!("average package size is {}", ByteSize::b(actual_size / count));
+    println!(
+        "average compression ratio: {}",
+        (compressed as f64) / (actual_size as f64)
+    );
 }
