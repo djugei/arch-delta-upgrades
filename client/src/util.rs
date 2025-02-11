@@ -18,7 +18,6 @@ use ruma_headers::ContentDisposition;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     pin,
-    sync::Semaphore,
 };
 
 type Str = Box<str>;
@@ -32,12 +31,9 @@ pub(crate) fn progress_style() -> ProgressStyle {
         .progress_chars("█▇▆▅▄▃▂▁  ")
 }
 
-pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<Semaphore>>(
-    multi: MultiProgress,
+pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
+    global: crate::GlobalState,
     pkg: &Package,
-    client: Client,
-    request_guard: G,
-    dl_guard: G,
     url: Url,
     target: W,
 ) -> Result<ProgressBar, anyhow::Error> {
@@ -46,19 +42,19 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
         .with_style(progress_style());
 
-    let pg = multi.add(pg);
+    let pg = global.multi.add(pg);
     pin!(target);
     let mut target = pg.wrap_async_write(target);
     let mut tries = 8_u8;
     //TODO: abstract retry logic
     'retry: loop {
-        let guard = request_guard.as_ref().acquire().await?;
+        let guard = global.maxpar_req.as_ref().acquire().await?;
         pg.tick();
         let write_offset = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
         // get the server to generate the delta, this is expected to time out, possibly multiple times
         let mut delta = {
             loop {
-                let mut req = client.get(url.clone());
+                let mut req = global.client.get(url.clone());
                 if write_offset != 0 {
                     let range = format!("bytes={write_offset}-");
                     debug!("{pkg:?} sending range request {range}");
@@ -96,7 +92,7 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek, G: AsRef<
         // acquire guard after sending request but before using the body
         // so the deltas can get generated on the server as parallel as possible
         // but the download does not get fragmented/overwhelmed
-        let guard = dl_guard.as_ref().acquire().await?;
+        let guard = global.maxpar_dl.as_ref().acquire().await?;
 
         match delta.status() {
             StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
