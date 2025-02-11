@@ -31,7 +31,7 @@ pub(crate) fn progress_style() -> ProgressStyle {
         .progress_chars("█▇▆▅▄▃▂▁  ")
 }
 
-pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
+pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
     global: crate::GlobalState,
     pkg: &Package,
     url: Url,
@@ -139,10 +139,99 @@ pub(crate) async fn do_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
     Ok(pg)
 }
 
+// This is almost a 1-1 copy for do_delta_download,
+// except less timeout stuff around the header
+// TODO: unify signature, delta and boring download.
+// TODO: extract retry and range logic.
+// retryer(function -> result, state (ex: count), allow (state, error) -> bool ) -> result
+pub(crate) async fn do_boring_download(
+    global: crate::GlobalState,
+    url: Url,
+    mut target: PathBuf,
+) -> Result<u64, anyhow::Error> {
+    let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
+    let pkg = Package::try_from(name)?;
+    target.push(name);
+    debug!("boring dl {name}, {:?}", target);
+    let target = tokio::fs::File::create(target).await?;
+
+    let pg = ProgressBar::hidden()
+        .with_prefix("downloading")
+        .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
+        .with_style(progress_style());
+    let pg = global.multi.add(pg);
+    pin!(target);
+    let mut target = pg.wrap_async_write(target);
+    let mut tries = 8_u8;
+
+    'retry: loop {
+        let guard = global.maxpar_dl.as_ref().acquire().await?;
+        let write_offset = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        let mut req = global.client.get(url.clone());
+        if write_offset != 0 {
+            let range = format!("bytes={write_offset}-");
+            debug!("{pkg:?} sending range request {range}");
+            req = req.header(http::header::RANGE, range);
+        }
+        let mut resp = req.send().await?;
+
+        pg.set_length(resp.content_length().map(|c| c + write_offset).unwrap_or(0));
+        debug!(
+            "content_length: {:?}, write_offset: {}",
+            resp.content_length(),
+            write_offset
+        );
+        pg.set_prefix("download");
+        pg.tick();
+        match resp.status() {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
+            s => bail!("got unknown status code {}, bailing", s),
+        }
+        let h = resp.headers().get(CONTENT_RANGE);
+        match (write_offset == 0, h) {
+            (true, None) => (),
+            (_at_start, Some(_h)) => {
+                (/* todo: maybe parse the range header and check that it starts at the write_offset */)
+            }
+            (false, None) => {
+                debug!("no content range on range request response");
+                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+                pg.set_position(0);
+            }
+        }
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    target.write_all(&chunk).await?;
+                }
+                Ok(None) => {
+                    // done
+                    drop(guard);
+                    break 'retry;
+                }
+                Err(e) => {
+                    if tries != 0 {
+                        // Download failed here, we will retry with partial-header at the current position
+                        debug!("download failed, {tries} left");
+                        tries -= 1;
+                        drop(guard);
+                        continue 'retry;
+                    } else {
+                        bail!(e);
+                    }
+                }
+            }
+        }
+    }
+
+    let size = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
+    Ok(size)
+}
+
 pub(crate) fn find_deltaupgrade_candidates(
     blacklist: &[Str],
     fuz: bool,
-) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<String>), anyhow::Error> {
+) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<Url>), anyhow::Error> {
     let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
     let packageversions = build_package_versions().expect("io error on local disk");
     let (mut delta_upgrades, downloads): (Vec<_>, Vec<_>) = upgrades
@@ -194,12 +283,13 @@ pub(crate) fn find_deltaupgrade_candidates(
                 Ok((line, pkg, oldpkg, oldfile, (dec_size as u64)))
             } else {
                 info!("no cached package found, leaving {} for pacman", filename);
-                Err(line)
+                return Err(line);
             }
         })
         .partition_result();
     delta_upgrades.sort_unstable_by_key(|(_, _, _, _, size)| std::cmp::Reverse(*size));
-    Ok((delta_upgrades, downloads))
+    let downloads: Result<Vec<Url>, _> = downloads.into_iter().map(|l| Url::parse(&l)).collect();
+    Ok((delta_upgrades, downloads?))
 }
 
 pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {

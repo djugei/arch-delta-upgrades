@@ -218,8 +218,7 @@ async fn do_upgrade(
     multi: MultiProgress,
     fuz: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    //TODO: download full packages too, rate-limited by maxpar_dl.
-    let (upgrade_candidates, _downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
+    let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
     let maxpar_req = Arc::new(Semaphore::new(5));
@@ -271,10 +270,28 @@ async fn do_upgrade(
         debug!("spawned task for {}", newpkg.get_name());
     }
 
+    let mut dlset = JoinSet::new();
+    for url in downloads {
+        let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
+        let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
+        let pkg = Package::try_from(name).unwrap();
+        let get_sig_f = get_signature(url.as_str().into(), client.clone(), delta_cache.clone(), pkg);
+        dlset.spawn(async move {
+            let (f, s) = tokio::join!(boring_dl, get_sig_f);
+            let f = f.context("boring dl failed")?;
+            if let Err(e) = s.context("creating signature file failed") {
+                error!("{e}");
+                error!("continuing")
+            };
+            Ok::<_, anyhow::Error>(f)
+        });
+    }
+
     let mut deltasize = 0;
     let mut newsize = 0;
     let mut comptime = Some(Duration::from_secs(0));
     let mut lasterror = None;
+
     while let Some(res) = set.join_next().await {
         match res.unwrap() {
             Err(e) => {
@@ -294,6 +311,23 @@ async fn do_upgrade(
             }
         }
     }
+    while let Some(res) = dlset.join_next().await {
+        match res.unwrap() {
+            Ok(s) => {
+                newsize += s;
+                deltasize += s
+            }
+            Err(e) => {
+                error!("{:?}", e);
+                for cause in e.chain() {
+                    error!("caused by: {:#}", cause);
+                }
+                error!("if the error is temporary, you can try running the command again");
+                lasterror = Some(e);
+            }
+        }
+    }
+
     lasterror.ok_or((deltasize, newsize, comptime)).swap()
 }
 
@@ -330,7 +364,7 @@ async fn get_delta(
         .await
         .unwrap();
     let url = server.join(&format!("/arch/{oldpkg}/{newpkg}"))?;
-    let pg = util::do_download(global.clone(), &newpkg, url.clone(), &mut deltafile).await?;
+    let pg = util::do_delta_download(global.clone(), &newpkg, url.clone(), &mut deltafile).await?;
     info!(
         "downloaded {} in {} seconds",
         deltafile_name.display(),
