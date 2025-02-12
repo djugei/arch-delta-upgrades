@@ -37,6 +37,10 @@ enum Commands {
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
         no_fuz: bool,
+        /// Only do delta, downloads,
+        /// leave other upgrades to pacman
+        #[arg(long)]
+        only_delta: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: target directory/rootless mode
@@ -68,6 +72,10 @@ enum Commands {
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
         no_fuz: bool,
+        /// Only do delta, downloads,
+        /// leave other upgrades to pacman
+        #[arg(long)]
+        only_delta: bool,
     },
     /// Calculate and display some statistics about effectiveness of the delta-encoding
     Stats {
@@ -122,15 +130,17 @@ fn main() {
             pacman_sync,
             blacklist,
             no_fuz,
-        } => full_upgrade(multi, server, pacman_sync, blacklist, no_fuz),
+            only_delta,
+        } => full_upgrade(multi, server, pacman_sync, blacklist, no_fuz, only_delta),
         Commands::Download {
             server,
             delta_cache,
             no_fuz,
+            only_delta,
         } => {
             std::fs::create_dir_all(&delta_cache).unwrap();
             mkruntime()
-                .block_on(do_upgrade(server, vec![], delta_cache, multi, !no_fuz))
+                .block_on(do_upgrade(server, vec![], delta_cache, multi, !no_fuz, only_delta))
                 .unwrap();
         }
         Commands::Sync { server } => {
@@ -152,7 +162,14 @@ async fn sync(server: Url, multi: MultiProgress) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn full_upgrade(multi: MultiProgress, server: Url, pacman_sync: bool, blacklist: Vec<Box<str>>, no_fuz: bool) {
+fn full_upgrade(
+    multi: MultiProgress,
+    server: Url,
+    pacman_sync: bool,
+    blacklist: Vec<Box<str>>,
+    no_fuz: bool,
+    only_delta: bool,
+) {
     let runtime = mkruntime();
     if pacman_sync {
         info!("running pacman -Sy");
@@ -170,14 +187,15 @@ fn full_upgrade(multi: MultiProgress, server: Url, pacman_sync: bool, blacklist:
         runtime.block_on(sync(server.clone(), multi.clone())).unwrap();
     }
     let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-    let (deltasize, newsize, comptime) =
-        match runtime.block_on(async move { do_upgrade(server, blacklist, cachepath, multi.clone(), !no_fuz).await }) {
-            Ok((d, n, c)) => (d, n, c),
-            Err(e) => {
-                error!("{e}");
-                panic!("{e}")
-            }
-        };
+    let (deltasize, newsize, comptime) = match runtime
+        .block_on(async move { do_upgrade(server, blacklist, cachepath, multi.clone(), !no_fuz, only_delta).await })
+    {
+        Ok((d, n, c)) => (d, n, c),
+        Err(e) => {
+            error!("{e}");
+            panic!("{e}")
+        }
+    };
     info!("running pacman -Su to install updates");
     let exit = Command::new("pacman")
         .args(["-Su", "--noconfirm"])
@@ -217,6 +235,7 @@ async fn do_upgrade(
     delta_cache: PathBuf,
     multi: MultiProgress,
     fuz: bool,
+    only_delta: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
     let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
@@ -271,20 +290,22 @@ async fn do_upgrade(
     }
 
     let mut dlset = JoinSet::new();
-    for url in downloads {
-        let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
-        let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
-        let pkg = Package::try_from(name).unwrap();
-        let get_sig_f = get_signature(url.as_str().into(), client.clone(), delta_cache.clone(), pkg);
-        dlset.spawn(async move {
-            let (f, s) = tokio::join!(boring_dl, get_sig_f);
-            let f = f.context("boring dl failed")?;
-            if let Err(e) = s.context("creating signature file failed") {
-                error!("{e}");
-                error!("continuing")
-            };
-            Ok::<_, anyhow::Error>(f)
-        });
+    if !only_delta {
+        for url in downloads {
+            let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
+            let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
+            let pkg = Package::try_from(name).unwrap();
+            let get_sig_f = get_signature(url.as_str().into(), client.clone(), delta_cache.clone(), pkg);
+            dlset.spawn(async move {
+                let (f, s) = tokio::join!(boring_dl, get_sig_f);
+                let f = f.context("boring dl failed")?;
+                if let Err(e) = s.context("creating signature file failed") {
+                    error!("{e}");
+                    error!("continuing")
+                };
+                Ok::<_, anyhow::Error>(f)
+            });
+        }
     }
 
     let mut deltasize = 0;
