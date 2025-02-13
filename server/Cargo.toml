@@ -16,6 +16,8 @@ tokio = { version = "*", features = ["rt", "sync", "fs", "io-util", "macros", "t
 tokio-util = { version = "*", features = ["io"] }
 futures-util = "*"
 
+listenfd = "*"
+
 axum =  { version = "*", features = [] }
 reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 axum-range = "*"

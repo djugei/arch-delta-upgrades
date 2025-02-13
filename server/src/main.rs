@@ -106,7 +106,13 @@ fn main() {
                 .with_state(state);
 
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            let listener = if let Some(listener) = listenfd::ListenFd::from_env().take_tcp_listener(0).ok().flatten() {
+                info!("listening on {:?}", listener);
+                tokio::net::TcpListener::from_std(listener).unwrap()
+            } else {
+                info!("binding to {:?}", addr);
+                tokio::net::TcpListener::bind(addr).await.unwrap()
+            };
             axum::serve(listener, app).await.unwrap();
         })
 }
