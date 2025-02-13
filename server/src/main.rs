@@ -9,8 +9,8 @@ use axum::{
 use axum_extra::headers;
 use axum_extra::headers::HeaderMapExt;
 use caches::{DBCache, DeltaCache};
-use std::{io::SeekFrom, panic, path::PathBuf, str::FromStr, sync::Arc};
-use tokio::{fs::File, io::AsyncSeekExt};
+use std::{io::SeekFrom, panic, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use tokio::{fs::File, io::AsyncSeekExt, sync::Mutex, time::Instant};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, trace, Instrument};
 
@@ -85,18 +85,30 @@ fn main() {
     let delta_cache = FileCache::new(caches::DeltaCache(package_cache), parallel.into());
     let delta_cache = delta_cache;
 
-    let state = AppState {
-        pkg: delta_cache.into(),
-        core: DBCache::new("core".into(), client.clone()).unwrap().into(),
-        extra: DBCache::new("extra".into(), client.clone()).unwrap().into(),
-        multilib: DBCache::new("multilib".into(), client.clone()).unwrap().into(),
-    };
-
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
+            let last_activity;
+            let listener = if let Some(listener) = listenfd::ListenFd::from_env().take_tcp_listener(0).ok().flatten() {
+                info!("listening on {:?}", listener);
+                last_activity = Some(Arc::new(Mutex::new(Instant::now())));
+                tokio::net::TcpListener::from_std(listener).unwrap()
+            } else {
+                info!("binding to {:?}", addr);
+                last_activity = None;
+                tokio::net::TcpListener::bind(addr).await.unwrap()
+            };
+
+            let state = AppState {
+                pkg: delta_cache.into(),
+                core: DBCache::new("core".into(), client.clone()).unwrap().into(),
+                extra: DBCache::new("extra".into(), client.clone()).unwrap().into(),
+                multilib: DBCache::new("multilib".into(), client.clone()).unwrap().into(),
+                last_activity: last_activity.clone(),
+            };
             let app = Router::new()
                 .fallback(fallback)
                 .route("/", get(root))
@@ -105,16 +117,39 @@ fn main() {
                 .route("/archdb/{name}/{old}", get(dbdelta))
                 .with_state(state);
 
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 3000));
-            let listener = if let Some(listener) = listenfd::ListenFd::from_env().take_tcp_listener(0).ok().flatten() {
-                info!("listening on {:?}", listener);
-                tokio::net::TcpListener::from_std(listener).unwrap()
-            } else {
-                info!("binding to {:?}", addr);
-                tokio::net::TcpListener::bind(addr).await.unwrap()
-            };
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown(last_activity))
+                .await
+                .unwrap();
         })
+}
+
+async fn shutdown(active: Option<Arc<Mutex<Instant>>>) {
+    use tokio::signal::unix;
+    let terminate = async {
+        unix::signal(unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    if let Some(active) = active {
+        let timeout = async {
+            loop {
+                let deadline = active.lock().await.checked_add(Duration::from_secs(11 * 60)).unwrap();
+                tokio::time::sleep_until(deadline).await;
+                if Instant::now().duration_since(*active.lock().await) > Duration::from_secs(10 * 60) {
+                    info!("no activity since {active:?}, shutting down");
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _ = terminate => (),
+            _ = timeout => ()
+        };
+    } else {
+        terminate.await;
+    };
 }
 
 #[derive(Clone)]
@@ -123,6 +158,8 @@ struct AppState {
     core: Arc<DBCache>,
     extra: Arc<DBCache>,
     multilib: Arc<DBCache>,
+    //TODO: replace by atomic
+    last_activity: Option<Arc<Mutex<Instant>>>,
 }
 
 type RangeFile = axum_range::RangedStream<axum_range::KnownSize<File>>;
@@ -144,6 +181,10 @@ async fn db(
                 "currently only core, extra and multilib are supported.".into(),
             ))
         }
+    };
+    if let Some(activity) = s.last_activity {
+        let mut activity = activity.lock().await;
+        *activity = Instant::now();
     };
 
     info!(name = name, "getting");
@@ -182,6 +223,10 @@ async fn dbdelta(
             ))
         }
     };
+    if let Some(activity) = s.last_activity {
+        let mut activity = activity.lock().await;
+        *activity = Instant::now();
+    };
 
     info!(name = name, "getting");
 
@@ -212,6 +257,10 @@ async fn gen_delta(
     Path((from, to)): Path<(Str, Str)>,
     range: Option<axum_extra::TypedHeader<axum_extra::headers::Range>>,
 ) -> Result<(StatusCode, HeaderMap, RangeFile), (StatusCode, String)> {
+    if let Some(activity) = s.last_activity {
+        let mut activity = activity.lock().await;
+        *activity = Instant::now();
+    };
     let s = s.pkg.clone();
     let c_span = tracing::info_span!("delta request", from, to);
     let c = || async {

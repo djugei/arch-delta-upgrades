@@ -12,7 +12,7 @@ anyhow = "*"
 tracing = "*"
 tracing-subscriber = "0.3.18"
 
-tokio = { version = "*", features = ["rt", "sync", "fs", "io-util", "macros", "tracing"] }
+tokio = { version = "*", features = ["rt", "sync", "fs", "io-util", "macros", "tracing", "time", "signal"] }
 tokio-util = { version = "*", features = ["io"] }
 futures-util = "*"
 
