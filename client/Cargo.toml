@@ -9,7 +9,7 @@ edition = "2021"
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt", "experimental"] }
 indicatif = { version = ">=0.17.0", features = ["tokio"] }
-reqwest = { version = "*", default-features = false}
+reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
 http = "*"
 clap = { version = "*", features = ["derive"] }
 itertools = "*"
