@@ -1,0 +1,13 @@
+[Unit]
+Description = Hourly delta packet fetch
+
+[Timer]
+# run once every hour
+# intentionally runs every client globally at the same time,
+# to generate less database deltas
+OnCalendar = *:13:37
+# don't run on boot-up or resume
+Persistent=false
+
+[Install]
+WantedBy = timers.target

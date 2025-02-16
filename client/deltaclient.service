@@ -1,0 +1,13 @@
+[Unit]
+Description = Deltaclient packet fetcher
+# just skip one update if the system is in a troubled state
+ConditionMemoryPressure = 10%/5min
+ConditionCPUPressure = 10%/5min
+
+[Service]
+Type = oneshot
+ExecStart = /usr/bin/deltaclient sync http://bogen.moeh.re/
+# as long as sync can't run without root we dl straight to pacman cache
+ExecStart = /usr/bin/deltaclient download --no-fuz --only-delta http://bogen.moeh.re/ /var/cache/pacman/pkg/
+RemainAfterExit = no
+
