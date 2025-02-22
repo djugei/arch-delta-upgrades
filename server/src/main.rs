@@ -1,4 +1,3 @@
-use anyhow::bail;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -10,9 +9,10 @@ use axum_extra::headers;
 use axum_extra::headers::HeaderMapExt;
 use caches::{DBCache, DeltaCache};
 use std::{io::SeekFrom, panic, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use thiserror::Error;
 use tokio::{fs::File, io::AsyncSeekExt, sync::Mutex, time::Instant};
 use tokio_util::io::ReaderStream;
-use tracing::{debug, error, info, trace, Instrument};
+use tracing::{debug, error, info, trace};
 
 use async_file_cache::FileCache;
 
@@ -209,7 +209,6 @@ async fn dbdelta(
     State(s): State<AppState>,
     Path((name, old)): Path<(Str, u64)>,
 ) -> Result<(StatusCode, HeaderMap, Body), (StatusCode, String)> {
-    //TODO: handle range request for 0 bytes with 0 byte response
     debug!("entering db fn with {} {:?}", name, old);
 
     let db = match name.as_ref() {
@@ -252,25 +251,50 @@ async fn dbdelta(
     }
 }
 
+#[derive(Error, Debug)]
+pub enum GenDeltaError {
+    #[error("could not parse package name: {0}")]
+    Parse(#[from] parsing::PackageParseError),
+    #[error("invalid package combiation: {0}")]
+    DeltaMeta(#[from] parsing::DeltaError),
+    #[error("failed delta creation: {0}")]
+    DeltaGen(#[from] caches::DeltaError),
+    #[error("{0:?}")]
+    Range(axum_range::RangeNotSatisfiable),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("other error {0}")]
+    Other(Box<str>),
+}
 async fn gen_delta(
     State(s): State<AppState>,
     Path((from, to)): Path<(Str, Str)>,
     range: Option<axum_extra::TypedHeader<axum_extra::headers::Range>>,
-) -> Result<(StatusCode, HeaderMap, RangeFile), (StatusCode, String)> {
+) -> Result<(StatusCode, HeaderMap, RangeFile), (StatusCode, HeaderMap, String)> {
     if let Some(activity) = s.last_activity {
         let mut activity = activity.lock().await;
         *activity = Instant::now();
     };
     let s = s.pkg.clone();
-    let c_span = tracing::info_span!("delta request", from, to);
-    let c = || async {
+    async fn try_gen_delta(
+        s: Arc<FileCache<DeltaCache>>,
+        from: &str,
+        to: &str,
+        range: Option<axum_extra::TypedHeader<headers::Range>>,
+    ) -> Result<
+        (
+            StatusCode,
+            HeaderMap,
+            axum_range::RangedStream<axum_range::KnownSize<File>>,
+        ),
+        GenDeltaError,
+    > {
         let from = Package::try_from(&*from)?;
         let to = Package::try_from(&*to)?;
         if strsim::levenshtein(from.get_name(), to.get_name()) > 3 {
-            bail!("packages are too different")
+            return Err(GenDeltaError::Other("packages are too different".into()));
         }
         let delta: Delta = (from, to).try_into()?;
-
         let file = {
             let delta = delta.clone();
             // spawning is done here so the generation continues even if the original request times out or is cancled
@@ -283,12 +307,13 @@ async fn gen_delta(
                 Ok(r) => r??,
             }
         };
-
         let body = axum_range::KnownSize::file(file).await?;
         let range = range.map(|axum_extra::TypedHeader(range)| range);
         let is_range_req = range.is_some();
         debug!("range: {range:?} for {delta:?}");
-        let resp = axum_range::Ranged::new(range, body).try_respond().unwrap();
+        let resp = axum_range::Ranged::new(range, body)
+            .try_respond()
+            .map_err(|e| GenDeltaError::Range(e))?;
 
         let mut h = HeaderMap::new();
         h.typed_insert(resp.content_length);
@@ -305,14 +330,22 @@ async fn gen_delta(
         } else {
             StatusCode::OK
         };
-        anyhow::Ok((status, h, resp.stream))
-    };
-    c().instrument(c_span).await.map_err(|e| {
-        error!("{:?}", e);
-        (
-            axum::http::status::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("error producing delta: {}", e),
-        )
+        Ok((status, h, resp.stream))
+    }
+
+    try_gen_delta(s, from.as_ref(), to.as_ref(), range).await.map_err(|e| {
+        let mut h = HeaderMap::new();
+        if let GenDeltaError::Range(r) = e {
+            h.typed_insert(r.0);
+            (axum::http::status::StatusCode::RANGE_NOT_SATISFIABLE, h, String::new())
+        } else {
+            error!("{:?}", e);
+            (
+                axum::http::status::StatusCode::INTERNAL_SERVER_ERROR,
+                h,
+                format!("error producing delta: {}", e),
+            )
+        }
     })
 }
 
