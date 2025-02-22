@@ -66,7 +66,9 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
                         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
                             debug!("timeout; retrying {}", url)
                         }
-                        status if !status.is_success() => bail!("request failed with {}", status),
+                        status if !status.is_success() && !status.as_u16() == 416 => {
+                            bail!("request failed with {}", status)
+                        }
                         _ => break d,
                     },
                     Err(e) => {
@@ -96,6 +98,21 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
 
         match delta.status() {
             StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
+            StatusCode::RANGE_NOT_SATISFIABLE => {
+                if let Some(r) = delta.headers().get("content-range") {
+                    let s = r.to_str()?;
+                    let (e, bytes) = s.split_once("bytes */").context(format!("invalid range, s: {}", s))?;
+                    if e.len() != 0 {
+                        bail!("invalid range, e: {}", e)
+                    }
+                    let bytes: u64 = bytes.parse()?;
+                    if bytes == write_offset {
+                        return Ok(pg);
+                    }
+                }
+
+                bail!("invalid range, h: {:#?}", delta.headers())
+            }
             s => bail!("got unknown status code {}, bailing", s),
         }
         let h = delta.headers().get(CONTENT_RANGE);
