@@ -1,9 +1,10 @@
 [package]
 name = "deltaclient"
 version = "0.5.0"
-edition = "2021"
+edition = "2024"
 authors = ["djugei"]
 license = "AGPL-3.0-or-later"
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

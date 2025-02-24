@@ -5,9 +5,9 @@ use std::{
     process::Command,
 };
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use bytesize::ByteSize;
-use http::{header::CONTENT_RANGE, StatusCode};
+use http::{StatusCode, header::CONTENT_RANGE};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::{debug, info, trace};
