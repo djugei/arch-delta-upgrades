@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
 use common::Package;
-use http::{StatusCode, header::CONTENT_RANGE};
+use http::StatusCode;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::{debug, info, trace};
@@ -36,212 +36,44 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
     pkg: &Package,
     url: Url,
     target: W,
-) -> Result<ProgressBar, anyhow::Error> {
+) -> Result<ProgressBar, common::DLError> {
+    let limit = common::Limits {
+        maxpar_dl: global.maxpar_dl,
+        maxpar_req: global.maxpar_req,
+    };
     let pg = ProgressBar::hidden()
-        .with_prefix("server generates")
         .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
         .with_style(progress_style());
-
     let pg = global.multi.add(pg);
+
     pin!(target);
-    let mut target = pg.wrap_async_write(target);
-    let mut tries = 8_u8;
-    //TODO: abstract retry logic
-    'retry: loop {
-        let guard = global.maxpar_req.as_ref().acquire().await?;
-        pg.tick();
-        let write_offset = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
-        // get the server to generate the delta, this is expected to time out, possibly multiple times
-        let mut delta = {
-            loop {
-                let mut req = global.client.get(url.clone());
-                if write_offset != 0 {
-                    let range = format!("bytes={write_offset}-");
-                    debug!("{pkg:?} sending range request {range}");
-                    req = req.header(http::header::RANGE, range);
-                }
-                // catch both client and server timeouts and simply retry
-                match req.timeout(std::time::Duration::from_secs(60 * 2)).send().await {
-                    Ok(d) => match d.status() {
-                        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
-                            debug!("timeout; retrying {}", url)
-                        }
-                        status if !status.is_success() && !status.as_u16() == 416 => {
-                            bail!("request failed with {}", status)
-                        }
-                        _ => break d,
-                    },
-                    Err(e) => {
-                        if !e.is_timeout() {
-                            bail!("{}", e);
-                        }
-                    }
-                }
-            }
-        };
-        std::mem::drop(guard);
-
-        pg.reset_elapsed();
-        pg.set_length(delta.content_length().map(|c| c + write_offset).unwrap_or(0));
-        debug!(
-            "content_length: {:?}, write_offset: {}",
-            delta.content_length(),
-            write_offset
-        );
-        pg.set_prefix("download");
-        pg.tick();
-
-        // acquire guard after sending request but before using the body
-        // so the deltas can get generated on the server as parallel as possible
-        // but the download does not get fragmented/overwhelmed
-        let guard = global.maxpar_dl.as_ref().acquire().await?;
-
-        match delta.status() {
-            StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
-            StatusCode::RANGE_NOT_SATISFIABLE => {
-                if let Some(r) = delta.headers().get("content-range") {
-                    let s = r.to_str()?;
-                    let (e, bytes) = s.split_once("bytes */").context(format!("invalid range, s: {}", s))?;
-                    if e.len() != 0 {
-                        bail!("invalid range, e: {}", e)
-                    }
-                    let bytes: u64 = bytes.parse()?;
-                    if bytes == write_offset {
-                        return Ok(pg);
-                    }
-                }
-
-                bail!("invalid range, h: {:#?}", delta.headers())
-            }
-            s => bail!("got unknown status code {}, bailing", s),
-        }
-        let h = delta.headers().get(CONTENT_RANGE);
-        match (write_offset == 0, h) {
-            (true, None) => (),
-            (_at_start, Some(_h)) => {
-                (/* todo: maybe parse the range header and check that it starts at the write_offset */)
-            }
-            (false, None) => {
-                debug!("no content range on range request response");
-                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-                pg.set_position(0);
-            }
-        }
-
-        // write all chunks from the network to the disk
-        loop {
-            match delta.chunk().await {
-                Ok(Some(chunk)) => {
-                    target.write_all(&chunk).await?;
-                }
-                Ok(None) => {
-                    // done
-                    drop(guard);
-                    break 'retry;
-                }
-                Err(e) => {
-                    if tries != 0 {
-                        // download failed here, we will retry with partial-header at the current position
-                        debug!("download failed, {tries} left");
-                        tries -= 1;
-                        drop(guard);
-                        continue 'retry;
-                    } else {
-                        bail!(e);
-                    }
-                }
-            }
-        }
-    }
-    Ok(pg)
+    common::dl_body(limit, global.client, pg.clone(), url, target)
+        .await
+        .map(|()| pg)
 }
 
-// This is almost a 1-1 copy for do_delta_download,
-// except less timeout stuff around the header
-// TODO: unify signature, delta and boring download.
-// TODO: extract retry and range logic.
-// retryer(function -> result, state (ex: count), allow (state, error) -> bool ) -> result
 pub(crate) async fn do_boring_download(
     global: crate::GlobalState,
     url: Url,
-    mut target: PathBuf,
-) -> Result<u64, anyhow::Error> {
-    let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
-    let pkg = Package::try_from(name)?;
-    target.push(name);
-    debug!("boring dl {name}, {:?}", target);
-    let target = tokio::fs::File::create(target).await?;
-
+    mut target_dir: PathBuf,
+) -> Result<u64, common::DLError> {
+    let limit = common::Limits {
+        maxpar_dl: global.maxpar_dl,
+        maxpar_req: global.maxpar_req,
+    };
+    let name = url.path_segments().and_then(Iterator::last).expect("malformed url");
+    let pkg = Package::try_from(name).expect("invalid file name");
     let pg = ProgressBar::hidden()
-        .with_prefix("downloading")
         .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
         .with_style(progress_style());
     let pg = global.multi.add(pg);
+
+    target_dir.push(name);
+    let target = tokio::fs::File::create(target_dir).await?;
+
     pin!(target);
-    let mut target = pg.wrap_async_write(target);
-    let mut tries = 8_u8;
-
-    'retry: loop {
-        let guard = global.maxpar_dl.as_ref().acquire().await?;
-        let write_offset = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
-        let mut req = global.client.get(url.clone());
-        if write_offset != 0 {
-            let range = format!("bytes={write_offset}-");
-            debug!("{pkg:?} sending range request {range}");
-            req = req.header(http::header::RANGE, range);
-        }
-        let mut resp = req.send().await?;
-
-        pg.set_length(resp.content_length().map(|c| c + write_offset).unwrap_or(0));
-        debug!(
-            "content_length: {:?}, write_offset: {}",
-            resp.content_length(),
-            write_offset
-        );
-        pg.set_prefix("download");
-        pg.tick();
-        match resp.status() {
-            StatusCode::OK | StatusCode::PARTIAL_CONTENT => (),
-            s => bail!("got unknown status code {}, bailing", s),
-        }
-        let h = resp.headers().get(CONTENT_RANGE);
-        match (write_offset == 0, h) {
-            (true, None) => (),
-            (_at_start, Some(_h)) => {
-                (/* todo: maybe parse the range header and check that it starts at the write_offset */)
-            }
-            (false, None) => {
-                debug!("no content range on range request response");
-                target.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-                pg.set_position(0);
-            }
-        }
-        loop {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => {
-                    target.write_all(&chunk).await?;
-                }
-                Ok(None) => {
-                    // done
-                    drop(guard);
-                    break 'retry;
-                }
-                Err(e) => {
-                    if tries != 0 {
-                        // Download failed here, we will retry with partial-header at the current position
-                        debug!("download failed, {tries} left");
-                        tries -= 1;
-                        drop(guard);
-                        continue 'retry;
-                    } else {
-                        bail!(e);
-                    }
-                }
-            }
-        }
-    }
-
-    let size = target.seek(std::io::SeekFrom::End(0)).await.unwrap();
+    common::dl_body(limit, global.client, pg.clone(), url, &mut target).await?;
+    let size = target.seek(std::io::SeekFrom::End(0)).await?;
     Ok(size)
 }
 

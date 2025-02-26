@@ -11,5 +11,8 @@ license = "LGPL-3.0+"
 thiserror = "*"
 
 reqwest = "*"
-tokio = "*"
+tokio = { version = "*", features = ["sync"] }
 indicatif = "*"
+
+[dev-dependencies]
+tokio = { version = "*", features = ["rt", "fs", "sync", "rt-multi-thread"] }

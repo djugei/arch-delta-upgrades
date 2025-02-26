@@ -264,6 +264,7 @@ async fn do_upgrade(
         client: client.clone(),
     };
 
+    let localset = tokio::task::LocalSet::new();
     let mut set = JoinSet::new();
     for (url, newpkg, oldpkg, oldfile, dec_size) in upgrade_candidates {
         let get_delta_f = get_delta(
@@ -277,15 +278,18 @@ async fn do_upgrade(
         );
         let get_sig_f = get_signature(url.into(), client.clone(), delta_cache.clone(), newpkg.clone());
 
-        set.spawn(async move {
-            let (f, s) = tokio::join!(get_delta_f, get_sig_f);
-            let f = f.context("creating delta file failed")?;
-            if let Err(e) = s.context("creating signature file failed") {
-                error!("{e}");
-                error!("continuing")
-            };
-            Ok::<_, anyhow::Error>(f)
-        });
+        set.spawn_local_on(
+            async move {
+                let (f, s) = tokio::join!(get_delta_f, get_sig_f);
+                let f = f.context("creating delta file failed")?;
+                if let Err(e) = s.context("creating signature file failed") {
+                    error!("{e}");
+                    error!("continuing")
+                };
+                Ok::<_, anyhow::Error>(f)
+            },
+            &localset,
+        );
         debug!("spawned task for {}", newpkg.get_name());
     }
 
@@ -296,15 +300,18 @@ async fn do_upgrade(
             let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
             let pkg = Package::try_from(name).unwrap();
             let get_sig_f = get_signature(url.as_str().into(), client.clone(), delta_cache.clone(), pkg);
-            dlset.spawn(async move {
-                let (f, s) = tokio::join!(boring_dl, get_sig_f);
-                let f = f.context("boring dl failed")?;
-                if let Err(e) = s.context("creating signature file failed") {
-                    error!("{e}");
-                    error!("continuing")
-                };
-                Ok::<_, anyhow::Error>(f)
-            });
+            dlset.spawn_local_on(
+                async move {
+                    let (f, s) = tokio::join!(boring_dl, get_sig_f);
+                    let f = f.context("boring dl failed")?;
+                    if let Err(e) = s.context("creating signature file failed") {
+                        error!("{e}");
+                        error!("continuing")
+                    };
+                    Ok::<_, anyhow::Error>(f)
+                },
+                &localset,
+            );
         }
     }
 
@@ -312,6 +319,8 @@ async fn do_upgrade(
     let mut newsize = 0;
     let mut comptime = Some(Duration::from_secs(0));
     let mut lasterror = None;
+
+    localset.await;
 
     while let Some(res) = set.join_next().await {
         match res.unwrap() {
