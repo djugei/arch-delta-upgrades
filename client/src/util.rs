@@ -7,12 +7,12 @@ use std::{
 
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
+use common::Package;
 use http::{StatusCode, header::CONTENT_RANGE};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::{debug, info, trace};
 use memmap2::Mmap;
-use parsing::Package;
 use reqwest::{Client, Url};
 use ruma_headers::ContentDisposition;
 use tokio::{
@@ -312,7 +312,7 @@ pub(crate) fn find_deltaupgrade_candidates(
 pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {
     //TODO use the same logic as the main delta downloads, including retries and progress bars
     info!("syncing {}", name);
-    let max = parsing::find_latest_db(&name, "/var/lib/pacman/sync/")?;
+    let max = common::find_latest_db(&name, "/var/lib/pacman/sync/")?;
     if let Some(old_ts) = max {
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;

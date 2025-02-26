@@ -30,5 +30,5 @@ zstd = { version = "*", features = ["zstdmt"] }
 flate2 = { version = "*" }
 strsim = "*"
 
-parsing = {path = "../parsing"}
+common = {path = "../common"}
 async_file_cache = {path = "../async_file_cache"}

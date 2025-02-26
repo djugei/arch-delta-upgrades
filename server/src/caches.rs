@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use async_file_cache::{CacheState, FileCache};
 use axum_extra::headers::{HeaderMapExt, IfModifiedSince, LastModified};
-use parsing::{Delta, Package};
+use common::{Delta, Package};
 use reqwest::Client;
 use thiserror::Error;
 use tokio::fs::File;
@@ -172,7 +172,7 @@ struct DBCacheSync {
 
 impl DBCache {
     pub fn new(name: Str, client: Client) -> Result<Self, DownloadError> {
-        let ts = parsing::find_latest_db(&*name, crate::get_db_path())?;
+        let ts = common::find_latest_db(&*name, crate::get_db_path())?;
         let ts = ts.unwrap_or(0);
         let ts = SystemTimeExt::from_timestamp(ts);
         let s = DBCache {

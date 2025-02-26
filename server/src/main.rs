@@ -16,7 +16,7 @@ use tracing::{debug, error, info, trace};
 
 use async_file_cache::FileCache;
 
-use parsing::{Delta, Package};
+use common::{Delta, Package};
 
 use std::sync::OnceLock;
 
@@ -254,9 +254,9 @@ async fn dbdelta(
 #[derive(Error, Debug)]
 pub enum GenDeltaError {
     #[error("could not parse package name: {0}")]
-    Parse(#[from] parsing::PackageParseError),
+    Parse(#[from] common::PackageParseError),
     #[error("invalid package combiation: {0}")]
-    DeltaMeta(#[from] parsing::DeltaError),
+    DeltaMeta(#[from] common::DeltaError),
     #[error("failed delta creation: {0}")]
     DeltaGen(#[from] caches::DeltaError),
     #[error("{0:?}")]

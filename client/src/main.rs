@@ -3,10 +3,10 @@ mod util;
 use anyhow::Context;
 use bytesize::ByteSize;
 use clap::Parser;
+use common::Package;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{debug, error, info, trace};
 use memmap2::Mmap;
-use parsing::Package;
 use reqwest::{Client, Url};
 use std::{
     fs::OpenOptions,
@@ -375,7 +375,7 @@ async fn get_delta(
     global.total_pg.inc_length(dec_size);
     let mut file_name = delta_cache.clone();
     file_name.push(newpkg.to_string());
-    let delta = parsing::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
+    let delta = common::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
     let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
     let mut deltafile = tokio::fs::File::options()
         .write(true)

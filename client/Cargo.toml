@@ -18,7 +18,7 @@ clap = { version = "*", features = ["derive"] }
 itertools = "*"
 log = "*"
 env_logger = "*"
-parsing = {path = "../parsing"}
+common = {path = "../common"}
 tokio = {version = "*", features = ["fs", "rt", "macros", "rt-multi-thread", "sync"]}
 indicatif-log-bridge = "*"
 anyhow = "*"
