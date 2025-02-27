@@ -37,17 +37,13 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
     url: Url,
     target: W,
 ) -> Result<ProgressBar, common::DLError> {
-    let limit = common::Limits {
-        maxpar_dl: global.maxpar_dl,
-        maxpar_req: global.maxpar_req,
-    };
     let pg = ProgressBar::hidden()
         .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
         .with_style(progress_style());
     let pg = global.multi.add(pg);
 
     pin!(target);
-    common::dl_body(limit, global.client, pg.clone(), url, target)
+    common::dl_body(global.to_limits(), global.client, pg.clone(), url, target)
         .await
         .map(|()| pg)
 }
@@ -57,10 +53,6 @@ pub(crate) async fn do_boring_download(
     url: Url,
     mut target_dir: PathBuf,
 ) -> Result<u64, common::DLError> {
-    let limit = common::Limits {
-        maxpar_dl: global.maxpar_dl,
-        maxpar_req: global.maxpar_req,
-    };
     let name = url.path_segments().and_then(Iterator::last).expect("malformed url");
     let pkg = Package::try_from(name).expect("invalid file name");
     let pg = ProgressBar::hidden()
@@ -72,7 +64,7 @@ pub(crate) async fn do_boring_download(
     let target = tokio::fs::File::create(target_dir).await?;
 
     pin!(target);
-    common::dl_body(limit, global.client, pg.clone(), url, &mut target).await?;
+    common::dl_body(global.to_limits(), global.client, pg.clone(), url, &mut target).await?;
     let size = target.seek(std::io::SeekFrom::End(0)).await?;
     Ok(size)
 }

@@ -371,6 +371,16 @@ pub(crate) struct GlobalState {
     client: Client,
 }
 
+impl GlobalState {
+    #[inline]
+    pub fn to_limits(&self) -> common::Limits {
+        common::Limits {
+            maxpar_dl: self.maxpar_dl.clone(),
+            maxpar_req: self.maxpar_req.clone(),
+        }
+    }
+}
+
 //TODO: maybe have less parameters somehow?
 async fn get_delta(
     global: GlobalState,
