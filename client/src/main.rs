@@ -114,6 +114,8 @@ fn main() {
 
     let args = Commands::parse();
 
+    let global = GlobalState::new(multi.clone(), 5, 1);
+
     match args {
         #[cfg(feature = "diff")]
         Commands::Delta { orig, new, patch } => {
@@ -144,20 +146,19 @@ fn main() {
                 .unwrap();
         }
         Commands::Sync { server } => {
-            mkruntime().block_on(sync(server, multi)).unwrap();
+            mkruntime().block_on(sync(global, server)).unwrap();
         }
         Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
     }
 }
 
-async fn sync(server: Url, multi: MultiProgress) -> anyhow::Result<()> {
+async fn sync(global: GlobalState, server: Url) -> anyhow::Result<()> {
     let server = server.join("archdb/")?;
-    let client = Client::new();
     //TODO sync databases configured in /etc/pacman.conf
     let (_core, _extra, _multilib) = tokio::try_join!(
-        util::sync_db(server.clone(), "core".into(), client.clone(), multi.clone()),
-        util::sync_db(server.clone(), "extra".into(), client.clone(), multi.clone()),
-        util::sync_db(server.clone(), "multilib".into(), client, multi),
+        util::sync_db(global.clone(), server.clone(), "core".into()),
+        util::sync_db(global.clone(), server.clone(), "extra".into()),
+        util::sync_db(global.clone(), server.clone(), "multilib".into()),
     )?;
     Ok(())
 }
@@ -184,7 +185,9 @@ fn full_upgrade(
         }
     } else {
         info!("syncing databases");
-        runtime.block_on(sync(server.clone(), multi.clone())).unwrap();
+        runtime
+            .block_on(sync(GlobalState::new(multi.clone(), 5, 1), server.clone()))
+            .unwrap();
     }
     let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
     let (deltasize, newsize, comptime) = match runtime
@@ -373,6 +376,32 @@ pub(crate) struct GlobalState {
 }
 
 impl GlobalState {
+    fn new(multi: MultiProgress, maxpar_req: usize, maxpar_dl: usize) -> Self {
+        let maxpar_req = Arc::new(Semaphore::new(maxpar_req));
+        let maxpar_dl = Arc::new(Semaphore::new(maxpar_dl));
+        let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        trace!("setting cpu parallelity to {parallel}");
+        let maxpar_cpu = Arc::new(Semaphore::new(parallel));
+        let client = reqwest::Client::new();
+
+        let total_pg = ProgressBar::new(0).with_style(
+            ProgressStyle::with_template("#### total: [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####")
+                .unwrap(),
+        );
+        let total_pg = multi.add(total_pg);
+        total_pg.tick();
+        total_pg.enable_steady_tick(Duration::from_millis(100));
+
+        Self {
+            multi,
+            total_pg,
+            maxpar_req,
+            maxpar_dl,
+            maxpar_cpu,
+            client,
+        }
+    }
+
     #[inline]
     pub fn to_limits(&self) -> common::Limits {
         common::Limits {

@@ -9,11 +9,11 @@ use anyhow::{Context, bail};
 use bytesize::ByteSize;
 use common::Package;
 use http::StatusCode;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::{debug, info, trace};
 use memmap2::Mmap;
-use reqwest::{Client, Url};
+use reqwest::Url;
 use ruma_headers::ContentDisposition;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
@@ -133,14 +133,14 @@ pub(crate) fn find_deltaupgrade_candidates(
     Ok((delta_upgrades, downloads?))
 }
 
-pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgress) -> anyhow::Result<()> {
+pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
     //TODO use the same logic as the main delta downloads, including retries and progress bars
     info!("syncing {}", name);
     let max = common::find_latest_db(&name, "/var/lib/pacman/sync/")?;
     if let Some(old_ts) = max {
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
-        let response = client.get(url).send().await?;
+        let response = global.client.get(url).send().await?;
         if response.status() == StatusCode::NOT_MODIFIED {
             info!("{name} is unchanged");
             return Ok(());
@@ -199,7 +199,7 @@ pub async fn sync_db(server: Url, name: Str, client: Client, _multi: MultiProgre
         info!("no timestamped db found, do full download");
         //TODO: maybe share this block between the two branches
         let url = server.join(&format!("{name}"))?;
-        let mut response = client.get(url).send().await?;
+        let mut response = global.client.get(url).send().await?;
         assert!(response.status().is_success());
         let header = response
             .headers()
