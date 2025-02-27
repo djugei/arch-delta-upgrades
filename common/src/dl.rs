@@ -60,6 +60,21 @@ pub struct Limits {
     pub maxpar_req: Arc<Semaphore>,
 }
 
+impl Limits {
+    pub fn one() -> Self {
+        Self {
+            maxpar_dl: Semaphore::new(1).into(),
+            maxpar_req: Semaphore::new(1).into(),
+        }
+    }
+    pub fn unlimited() -> Self {
+        Self {
+            maxpar_dl: Semaphore::new(Semaphore::MAX_PERMITS).into(),
+            maxpar_req: Semaphore::new(Semaphore::MAX_PERMITS).into(),
+        }
+    }
+}
+
 #[test]
 fn test_dl_body() {
     let limit = Limits {

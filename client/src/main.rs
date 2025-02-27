@@ -122,7 +122,7 @@ fn main() {
             gen_delta(&orig, &new, &patch).unwrap();
         }
         Commands::Patch { orig, patch, new } => {
-            let pb = multi.add(ProgressBar::new(0));
+            let pb = global.multi.add(ProgressBar::new(0));
             let orig = OpenOptions::new().read(true).open(orig).unwrap();
             let orig = zstd::decode_all(orig).unwrap();
             apply_patch(&orig, &patch, &new, pb).unwrap();
@@ -133,7 +133,7 @@ fn main() {
             blacklist,
             no_fuz,
             only_delta,
-        } => full_upgrade(multi, server, pacman_sync, blacklist, no_fuz, only_delta),
+        } => full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta),
         Commands::Download {
             server,
             delta_cache,
@@ -142,7 +142,7 @@ fn main() {
         } => {
             std::fs::create_dir_all(&delta_cache).unwrap();
             mkruntime()
-                .block_on(do_upgrade(server, vec![], delta_cache, multi, !no_fuz, only_delta))
+                .block_on(do_upgrade(global, server, vec![], delta_cache, !no_fuz, only_delta))
                 .unwrap();
         }
         Commands::Sync { server } => {
@@ -164,7 +164,7 @@ async fn sync(global: GlobalState, server: Url) -> anyhow::Result<()> {
 }
 
 fn full_upgrade(
-    multi: MultiProgress,
+    global: GlobalState,
     server: Url,
     pacman_sync: bool,
     blacklist: Vec<Box<str>>,
@@ -185,13 +185,11 @@ fn full_upgrade(
         }
     } else {
         info!("syncing databases");
-        runtime
-            .block_on(sync(GlobalState::new(multi.clone(), 5, 1), server.clone()))
-            .unwrap();
+        runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
     let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
     let (deltasize, newsize, comptime) = match runtime
-        .block_on(async move { do_upgrade(server, blacklist, cachepath, multi.clone(), !no_fuz, only_delta).await })
+        .block_on(async move { do_upgrade(global, server, blacklist, cachepath, !no_fuz, only_delta).await })
     {
         Ok((d, n, c)) => (d, n, c),
         Err(e) => {
@@ -233,17 +231,15 @@ fn mkruntime() -> tokio::runtime::Runtime {
 }
 
 async fn do_upgrade(
+    global: GlobalState,
     server: Url,
     blacklist: Vec<Str>,
     delta_cache: PathBuf,
-    multi: MultiProgress,
     fuz: bool,
     only_delta: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
     let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
-
-    let global = GlobalState::new(multi, 5, 1);
 
     let localset = tokio::task::LocalSet::new();
     let mut set = JoinSet::new();
