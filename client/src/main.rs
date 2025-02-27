@@ -243,29 +243,7 @@ async fn do_upgrade(
     let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
-    let maxpar_req = Arc::new(Semaphore::new(5));
-    let maxpar_dl = Arc::new(Semaphore::new(1));
-    let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    trace!("setting cpu parallelity to {parallel}");
-    let maxpar_cpu = Arc::new(Semaphore::new(parallel));
-    let client = reqwest::Client::new();
-
-    let total_pg = ProgressBar::new(0).with_style(
-        ProgressStyle::with_template("#### total: [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####")
-            .unwrap(),
-    );
-    let total_pg = multi.add(total_pg);
-    total_pg.tick();
-    total_pg.enable_steady_tick(Duration::from_millis(100));
-
-    let global = GlobalState {
-        multi,
-        total_pg,
-        maxpar_req,
-        maxpar_dl,
-        maxpar_cpu,
-        client: client.clone(),
-    };
+    let global = GlobalState::new(multi, 5, 1);
 
     let localset = tokio::task::LocalSet::new();
     let mut set = JoinSet::new();
@@ -279,7 +257,7 @@ async fn do_upgrade(
             delta_cache.clone(),
             server.clone(),
         );
-        let get_sig_f = get_signature(url.into(), client.clone(), delta_cache.clone(), newpkg.clone());
+        let get_sig_f = get_signature(url.into(), global.client.clone(), delta_cache.clone(), newpkg.clone());
 
         set.spawn_local_on(
             async move {
@@ -302,7 +280,7 @@ async fn do_upgrade(
             let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
             let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
             let pkg = Package::try_from(name).unwrap();
-            let get_sig_f = get_signature(url.as_str().into(), client.clone(), delta_cache.clone(), pkg);
+            let get_sig_f = get_signature(url.as_str().into(), global.client.clone(), delta_cache.clone(), pkg);
             dlset.spawn_local_on(
                 async move {
                     let (f, s) = tokio::join!(boring_dl, get_sig_f);
