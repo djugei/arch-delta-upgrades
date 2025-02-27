@@ -83,12 +83,12 @@ fn test_dl_body() {
 
 /// downloads a file from url, writes into target
 //TODO: return number of bytes loaded
-pub async fn dl_body<W>(global: Limits, client: Client, pg: ProgressBar, url: Url, target: W) -> Result<(), DLError>
+pub async fn dl_body<W>(limits: Limits, client: Client, pg: ProgressBar, url: Url, target: W) -> Result<(), DLError>
 where
     W: AsyncWrite + AsyncSeek + Unpin,
 {
     async fn try_dl_body<W>(
-        &mut (ref global, client, pg, ref url, ref mut target): &mut (Limits, &Client, &ProgressBar, Url, W),
+        &mut (ref limits, client, pg, ref url, ref mut target): &mut (Limits, &Client, &ProgressBar, Url, W),
     ) -> Result<(), DLError>
     where
         W: AsyncWrite + AsyncSeek + Unpin,
@@ -96,7 +96,7 @@ where
         //TODO: progress bar handling
         let write_offset = target.seek(std::io::SeekFrom::End(0)).await?;
         pg.set_position(write_offset);
-        let mut body = get_header(global, client, pg, url, 0).await?;
+        let mut body = get_header(limits, client, pg, url, 0).await?;
         pg.set_length(body.content_length().map(|c| c + write_offset).unwrap_or(0));
 
         pg.set_prefix("ratelimit(d)");
@@ -104,7 +104,7 @@ where
         // Acquire guard after sending request but before using the body
         // so the deltas can get generated on the server as parallel as possible
         // but the download does not get fragmented/overwhelmed
-        let guard = global.maxpar_dl.acquire().await?;
+        let guard = limits.maxpar_dl.acquire().await?;
         pg.set_prefix("downloading");
 
         match body.status() {
@@ -167,24 +167,24 @@ where
         true
     }
 
-    let mut op_state = (global, &client, &pg, url, target);
+    let mut op_state = (limits, &client, &pg, url, target);
     let mut tries_left = 3u8;
     retry(&mut op_state, try_dl_body, &mut tries_left, dl_body_check).await?;
     Ok(())
 }
 
 pub async fn get_header(
-    global: &Limits,
+    limits: &Limits,
     client: &Client,
     pg: &ProgressBar,
     url: &Url,
     write_offset: u64,
 ) -> Result<reqwest::Response, reqwest::Error> {
     async fn try_get_header(
-        &mut (global, client, pg, url, ref write_offset): &mut (&Limits, &Client, &ProgressBar, &Url, u64),
+        &mut (limits, client, pg, url, ref write_offset): &mut (&Limits, &Client, &ProgressBar, &Url, u64),
     ) -> Result<reqwest::Response, reqwest::Error> {
         pg.set_prefix("ratelimit(h)");
-        let guard = global.maxpar_req.acquire().await.unwrap();
+        let guard = limits.maxpar_req.acquire().await.unwrap();
         pg.set_prefix("waiting for server");
         let mut req = client.get(url.clone());
         if *write_offset != 0 {
@@ -206,7 +206,7 @@ pub async fn get_header(
         }
     }
 
-    let mut op_state = (global, client, pg, url, write_offset);
+    let mut op_state = (limits, client, pg, url, write_offset);
     let mut nothing = ();
     retry(&mut op_state, try_get_header, &mut nothing, header_continue).await
 }
