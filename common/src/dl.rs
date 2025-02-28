@@ -87,6 +87,7 @@ pub async fn dl_body<W>(limits: Limits, client: Client, pg: ProgressBar, url: Ur
 where
     W: AsyncWrite + AsyncSeek + Unpin,
 {
+    //TODO: pub this
     async fn try_dl_body<W>(
         &mut (ref limits, client, pg, ref url, ref mut target): &mut (Limits, &Client, &ProgressBar, Url, W),
     ) -> Result<(), DLError>

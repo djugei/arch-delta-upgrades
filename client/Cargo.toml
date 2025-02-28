@@ -23,7 +23,7 @@ tokio = {version = "*", features = ["fs", "rt", "macros", "rt-multi-thread", "sy
 indicatif-log-bridge = "*"
 anyhow = "*"
 memmap2 = "*"
-bytesize = "1.3.0"
+bytesize = "*"
 strsim = "0.11"
 dialoguer = "*"
 command-rusage = "1.0.1"

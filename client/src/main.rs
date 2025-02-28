@@ -341,6 +341,7 @@ async fn do_upgrade(
             }
         }
     }
+
     while let Some(res) = dlset.join_next().await {
         match res.unwrap() {
             Ok(s) => {
