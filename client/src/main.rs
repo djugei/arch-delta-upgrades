@@ -238,7 +238,7 @@ async fn do_upgrade(
     fuz: bool,
     only_delta: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&blacklist, fuz)?;
+    let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&global, &blacklist, fuz)?;
     info!("downloading {} updates", upgrade_candidates.len());
 
     let localset = tokio::task::LocalSet::new();

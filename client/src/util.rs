@@ -70,6 +70,7 @@ pub(crate) async fn do_boring_download(
 }
 
 pub(crate) fn find_deltaupgrade_candidates(
+    global: &crate::GlobalState,
     blacklist: &[Str],
     fuz: bool,
 ) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<Url>), anyhow::Error> {
@@ -97,11 +98,13 @@ pub(crate) fn find_deltaupgrade_candidates(
                     let prompt = format!(
                         "could not find cached package for {name}, {alternative} has a similar name, use that instead?"
                     );
-                    if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
-                        newest_cached(&packageversions, alternative)
-                    } else {
-                        None
-                    }
+                    global.multi.suspend(|| {
+                        if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
+                            newest_cached(&packageversions, alternative)
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     None
                 }
