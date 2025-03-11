@@ -86,9 +86,13 @@ pub(crate) fn find_deltaupgrade_candidates(
             continue;
         }
         let old_version = old.version.r(&i);
-        let cached = std::fs::File::open(format!("{PACMAN_CACHE}/{old_name}-{old_version}.pkg.tar.zstd"));
+        let old_arch = old.arch.as_str();
+        let cache_path = format!("{PACMAN_CACHE}/{old_name}-{old_version}-{old_arch}.pkg.tar.zst");
+        debug!("evaluating {cache_path}");
+        let cached = std::fs::File::open(cache_path);
         match cached {
             Ok(f) => {
+                debug!("cached package found for {old_name}-{old_version}");
                 // Safety: I promise to not open the same file as writable at the same time
                 let oldfile = unsafe { Mmap::map(&f).expect("mmap failed") };
                 // Testing reveals the average size to be 17.2 MB
@@ -107,15 +111,16 @@ pub(crate) fn find_deltaupgrade_candidates(
                     old_name.into(),
                     old_version.into(),
                     old.arch.as_str().into(),
-                    "pkg.tar.zstd".into(),
+                    "pkg.tar.zst".into(),
                 ));
                 let new_filename = new.filename.unwrap().r(&i);
                 let newpkg = Package::try_from(new_filename)?;
 
-                deltas.push((url, oldpkg, newpkg, oldfile, (dec_size as u64)));
+                deltas.push((url, newpkg, oldpkg, oldfile, (dec_size as u64)));
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
+                    debug!("direct download {old_name}-{old_version}");
                     //TODO: re-add fuzzy logic
                     direct_downloads.push(Url::parse(&url)?);
                 } else {
