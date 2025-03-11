@@ -16,3 +16,4 @@ debug=1
 ddelta = { git = "https://github.com/djugei/ddelta-rs" }
 indicatif = { git = "https://github.com/djugei/indicatif", branch = "heuristic" }
 hashbrown = { git = "https://github.com/djugei/hashbrown" }
+libalpm-rs = { git = "https://github.com/djugei/libalpm-rs" }

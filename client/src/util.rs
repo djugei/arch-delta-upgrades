@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    io::{BufRead, Read},
-    path::PathBuf,
-    process::Command,
-};
+use std::{collections::HashMap, io::Read, path::PathBuf};
 
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
@@ -21,7 +16,6 @@ use tokio::{
 };
 
 type Str = Box<str>;
-type PackageVersions = HashMap<Str, Vec<(Str, Str, Str, PathBuf)>>;
 
 static PACMAN_CACHE: &str = "/var/cache/pacman/pkg/";
 
@@ -70,49 +64,33 @@ pub(crate) async fn do_boring_download(
 }
 
 pub(crate) fn find_deltaupgrade_candidates(
-    global: &crate::GlobalState,
+    _global: &crate::GlobalState,
     blacklist: &[Str],
-    fuz: bool,
+    _fuz: bool,
 ) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<Url>), anyhow::Error> {
-    let upgrades = Command::new("pacman").args(["-Sup"]).output()?.stdout;
-    let packageversions = build_package_versions().expect("io error on local disk");
-    let (mut delta_upgrades, downloads): (Vec<_>, Vec<_>) = upgrades
-        .lines()
-        .map(|l| l.expect("pacman abborted output???"))
-        .filter(|l| !l.starts_with("file"))
-        .map(|line| {
-            let (_, filename) = line.rsplit_once('/').unwrap();
-            let pkg = Package::try_from(filename).unwrap();
-            let name = pkg.get_name();
-            if (&blacklist).into_iter().any(|e| **e == *name) {
-                info!("{name} is blacklisted, skipping");
-                return Err(line);
-            }
-            if let Some((oldpkg, oldpath)) = newest_cached(&packageversions, &pkg.get_name()).or_else(|| {
-                if fuz {
-                    let (alternative, _) = packageversions
-                        .keys()
-                        .map(|name| (name, strsim::levenshtein(name, pkg.get_name())))
-                        .filter(|(_name, sim)| sim <= &2)
-                        .min()?;
-                    let prompt = format!(
-                        "could not find cached package for {name}, {alternative} has a similar name, use that instead?"
-                    );
-                    global.multi.suspend(|| {
-                        if dialoguer::Confirm::new().with_prompt(prompt).interact().unwrap() {
-                            newest_cached(&packageversions, alternative)
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-            }) {
-                // Try to find the decompressed size for better progress monitoring
-                let oldfile = std::fs::File::open(oldpath).expect("io error on local disk");
+    let upgrades = libalpm_rs::upgrade_urls(&["core", "extra", "multilib"]);
+
+    let mut direct_downloads = Vec::new();
+    let mut deltas = Vec::new();
+    for (url, old, new) in upgrades {
+        assert_eq!(old.i, new.i);
+        use libalpm_rs::db::QuickResolve;
+        // Download already done
+        if url.starts_with("file:/") {
+            continue;
+        }
+        let i = old.i.borrow();
+        let old_name = old.name.r(&i);
+        if (&blacklist).into_iter().any(|e| **e == *old_name) {
+            info!("{old_name} is blacklisted, skipping");
+            continue;
+        }
+        let old_version = old.version.r(&i);
+        let cached = std::fs::File::open(format!("{PACMAN_CACHE}/{old_name}-{old_version}.pkg.tar.zstd"));
+        match cached {
+            Ok(f) => {
                 // Safety: I promise to not open the same file as writable at the same time
-                let oldfile = unsafe { Mmap::map(&oldfile).expect("mmap failed") };
+                let oldfile = unsafe { Mmap::map(&f).expect("mmap failed") };
                 // Testing reveals the average size to be 17.2 MB
                 let default_size = 17 * 1024 * 1024;
                 // Due to pacman packages being compressed in streaming mode
@@ -121,19 +99,32 @@ pub(crate) fn find_deltaupgrade_candidates(
                     // The real ratio is 18/47.4, 4/11 is close enough
                     .map(|s| (s as u64) * 4 / 11)
                     .unwrap_or_else(|| {
-                        debug!("using default size for {name}");
+                        let new_name = new.name.r(&i);
+                        debug!("using default size for {new_name}");
                         default_size
                     });
-                Ok((line, pkg, oldpkg, oldfile, (dec_size as u64)))
-            } else {
-                info!("no cached package found, leaving {} for pacman", filename);
-                return Err(line);
+                let oldpkg = Package::from_parts((
+                    old_name.into(),
+                    old_version.into(),
+                    old.arch.as_str().into(),
+                    "pkg.tar.zstd".into(),
+                ));
+                let new_filename = new.filename.unwrap().r(&i);
+                let newpkg = Package::try_from(new_filename)?;
+
+                deltas.push((url, oldpkg, newpkg, oldfile, (dec_size as u64)));
             }
-        })
-        .partition_result();
-    delta_upgrades.sort_unstable_by_key(|(_, _, _, _, size)| std::cmp::Reverse(*size));
-    let downloads: Result<Vec<Url>, _> = downloads.into_iter().map(|l| Url::parse(&l)).collect();
-    Ok((delta_upgrades, downloads?))
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    //TODO: re-add fuzzy logic
+                    direct_downloads.push(Url::parse(&url)?);
+                } else {
+                    return Err(e)?;
+                }
+            }
+        }
+    }
+    return Ok((deltas, direct_downloads));
 }
 
 pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
@@ -233,54 +224,6 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
         info!("finished downloading {name} at {new_ts}");
     }
     Ok(())
-}
-
-/// {package -> [(version, arch, trailer, path)]}
-fn build_package_versions() -> std::io::Result<PackageVersions> {
-    let mut package_versions: PackageVersions = HashMap::new();
-    for line in std::fs::read_dir(PACMAN_CACHE)? {
-        let line = line?;
-        if !line.file_type()?.is_file() {
-            continue;
-        }
-        let filename = line.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.ends_with(".zst") {
-            continue;
-        }
-        let path = line.path().into();
-        let package = Package::try_from(&*filename).expect("non-pkg zstd file in pacman cache dir?");
-        let (name, version, arch, trailer) = package.destructure();
-
-        match package_versions.entry(name) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().push((version, arch, trailer, path));
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(vec![(version, arch, trailer, path)]);
-            }
-        }
-    }
-    package_versions.shrink_to_fit();
-
-    for e in package_versions.values_mut() {
-        e.sort()
-    }
-
-    Ok(package_versions)
-}
-
-/// returns the newest package in /var/cache/pacman/pkg that
-/// fits the passed package
-fn newest_cached(pv: &PackageVersions, package_name: &str) -> Option<(Package, PathBuf)> {
-    pv.get(package_name)
-        .map(|e| e.last().expect("each entry has at least one version"))
-        .map(|(version, arch, trailer, path)| {
-            (
-                Package::from_parts((package_name.into(), version.clone(), arch.clone(), trailer.clone())),
-                path.clone(),
-            )
-        })
 }
 
 /// Calculates and prints some stats about bandwidth savings
