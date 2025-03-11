@@ -29,6 +29,7 @@ dialoguer = "*"
 command-rusage = "1.0.1"
 ruma-headers = {path = "../ruma-headers"}
 flate2 = { version = "*" }
+libalpm-rs = "*"
 
 [[bin]]
 name = "deltaclient"
