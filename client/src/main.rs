@@ -482,17 +482,53 @@ impl<T, E> ResultSwap<T, E> for Result<T, E> {
 
 #[cfg(feature = "diff")]
 fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error> {
+    use std::io::Read;
+    let baseline = memory_stats::memory_stats().unwrap().physical_mem;
+
     let orig = OpenOptions::new().read(true).open(orig).unwrap();
-    let mut orig = zstd::Decoder::new(orig)?;
+    let mut origb = Vec::new();
+    zstd::Decoder::new(orig)?.read_to_end(&mut origb)?;
+    let origb_len = origb.len();
+    let mut origb = Cursor::new(origb);
+
     let new = OpenOptions::new().read(true).open(new).unwrap();
-    let mut new = zstd::Decoder::new(new)?;
+    let mut newb = Vec::new();
+    zstd::Decoder::new(new)?.read_to_end(&mut newb)?;
+    let newb_len = newb.len();
+    let mut newb = Cursor::new(newb);
 
     let patch = OpenOptions::new().write(true).create(true).open(patch).unwrap();
     let mut patch = zstd::Encoder::new(patch, 22)?;
 
-    ddelta::generate_chunked(&mut orig, &mut new, &mut patch, None, |p| debug!("{p:?}")).unwrap();
+    let before = memory_stats::memory_stats().unwrap().physical_mem;
+    let mut max = before;
+    ddelta::generate_chunked(&mut origb, &mut newb, &mut patch, None, |p| {
+        match p {
+            ddelta::State::Reading => debug!("Reading"),
+            ddelta::State::Sorting => debug!("Sorting"),
+            ddelta::State::Working(b) => debug!("Working({})", ByteSize::b(b)),
+        };
+        max = max.max(memory_stats::memory_stats().unwrap().physical_mem);
+        debug!(
+            "adduse: {}",
+            ByteSize::b((max - origb_len - newb_len - baseline) as u64)
+        );
+    })
+    .unwrap();
     patch.do_finish()?;
 
+    debug!("init mem use: {}", ByteSize::b(before as u64));
+    debug!("maxi mem use: {}", ByteSize::b(max as u64));
+    debug!(
+        "orig: {}, new: {}",
+        ByteSize::b(origb_len as u64),
+        ByteSize::b(newb_len as u64)
+    );
+    debug!("baseline: {}", ByteSize::b(baseline as u64));
+    debug!(
+        "adduse: {}",
+        ByteSize::b((max - origb_len - newb_len - baseline) as u64)
+    );
     Ok(())
 }
 
