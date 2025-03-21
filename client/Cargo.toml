@@ -30,10 +30,11 @@ command-rusage = "1.0.1"
 ruma-headers = {path = "../ruma-headers"}
 flate2 = { version = "*" }
 libalpm-rs = "*"
+memory-stats = { version = "*", optional = true }
 
 [[bin]]
 name = "deltaclient"
 
 [features]
 default = ["diff"]
-diff = []
+diff = ["dep:memory-stats"]
