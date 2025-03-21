@@ -322,13 +322,28 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         }
     }
 
-    info!("worst ratios:");
-    for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
+    let iwidth = count.ilog10() as usize + 1;
+    let cwidth = pairs
+        .iter()
+        .map(|(_r, _n, c, _l, _dl, _abs)| c)
+        .max()
+        .cloned()
+        .unwrap_or_default()
+        .ilog10() as usize
+        + 1;
+
+    info!("worst ratios with 1+ hits:");
+    for (i, (ratio, name, ucount, len, dlen, abs)) in pairs
+        .iter()
+        .rev()
+        .filter(|(_r, _n, c, _l, _dl, _abs)| *c > 1)
+        .take(count)
+        .enumerate()
+    {
         info!(
-            "{}. {:.2}% {}: {} {} each update",
+            "{:>iwidth$}. {:.2}% {name}: {} {} in {ucount:>cwidth$} updates",
             i + 1,
             ratio * 100.,
-            name,
             ByteSize::b(*abs),
             if dlen < len { "saved" } else { "wasted" }
         )
@@ -337,10 +352,9 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     info!("top ratios:");
     for (i, (ratio, name, _count, len, dlen, abs)) in pairs.iter().take(count).enumerate() {
         info!(
-            "{}. {:.2}% {}: {} {} each update",
+            "{:>iwidth$}. {:.2}% {name}: {} {} each update",
             i + 1,
             ratio * 100.,
-            name,
             ByteSize::b(*abs),
             if dlen < len { "saved" } else { "wasted" }
         )
@@ -349,13 +363,13 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     info!("top size saves");
     for (i, (ratio, name, count, len, dlen, abs)) in pairs.iter().rev().take(count).enumerate() {
         info!(
-            "{}. {:.2}% {}: {} {} in {} updates",
+            "{:>iwidth$}. {} {} in {:>cwidth$} {name} {} ({:.2}%)",
             i + 1,
-            ratio * 100.,
-            name,
             ByteSize::b(*abs * count),
             if dlen < len { "saved" } else { "wasted" },
-            count
+            count,
+            if *count == 1 { "update" } else { "updates" },
+            ratio * 100.,
         )
     }
 
