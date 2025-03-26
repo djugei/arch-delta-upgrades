@@ -31,6 +31,7 @@ ruma-headers = {path = "../ruma-headers"}
 flate2 = { version = "*" }
 libalpm-rs = "*"
 memory-stats = { version = "*", optional = true }
+libc = "*"
 
 [[bin]]
 name = "deltaclient"

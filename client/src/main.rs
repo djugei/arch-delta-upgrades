@@ -133,22 +133,48 @@ fn main() {
             blacklist,
             no_fuz,
             only_delta,
-        } => full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta),
+        } => {
+            renice();
+            full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta)
+        }
         Commands::Download {
             server,
             delta_cache,
             no_fuz,
             only_delta,
         } => {
+            renice();
             std::fs::create_dir_all(&delta_cache).unwrap();
             mkruntime()
                 .block_on(do_upgrade(global, server, vec![], delta_cache, !no_fuz, only_delta))
                 .unwrap();
         }
         Commands::Sync { server } => {
+            renice();
             mkruntime().block_on(sync(global, server)).unwrap();
         }
         Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
+    }
+}
+
+fn renice() {
+    //SAFETY: this purely calls some libc functions, and does so correctly.
+    // No memory stuff is done.
+    unsafe {
+        // getpid always succeeds
+        let pid = libc::getpid() as u32;
+        // Not checking for error, only possible errors are misuse.
+        let curprio = libc::getpriority(libc::PRIO_PROCESS, pid);
+        trace!("current prio/nice is {curprio}");
+        if curprio > -10 {
+            let e = libc::setpriority(libc::PRIO_PROCESS, pid, -10);
+            if e == -1 {
+                let err = std::io::Error::last_os_error();
+                debug!("could not set/lower priority: {}", err);
+            } else {
+                trace!("set prio/nice to -10");
+            }
+        }
     }
 }
 
