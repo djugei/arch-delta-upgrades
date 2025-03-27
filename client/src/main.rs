@@ -24,11 +24,11 @@ type Str = Box<str>;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 enum Commands {
-    /// Run an entire upgrade, calling pacman interally, needs sudo to run.
+    /// Run an entire upgrade, calling pacman internally, needs sudo to run.
     Upgrade {
         server: Url,
-        #[arg(default_values_t = [Str::from("linux"), Str::from("blas"), Str::from("lapack")])]
-        blacklist: Vec<Box<str>>,
+        #[arg( default_values_t = default_blacklist() )]
+        blacklist: Vec<Str>,
         /// Use pacman for syncing the databases,
         /// if unset/by default uses delta-enabled sync.
         #[arg(long)]
@@ -95,6 +95,31 @@ enum Commands {
         patch: PathBuf,
         new: PathBuf,
     },
+}
+
+fn default_blacklist() -> Vec<Str> {
+    // Bad compression
+    let bad_compress = ["linux", "blas", "lapack"];
+    // Too big for the server to handle
+    let too_big = [
+        "intel-oneapi-basekit",
+        "hipblaslt",
+        "ginkgo-hpc-cuda",
+        "cuda",
+        "nltk-data",
+        "kicad-library-3d",
+        "rocm-llvm",
+        "texlive-doc",
+        "rocblas",
+    ];
+
+    let mut v: Vec<_> = bad_compress
+        .into_iter()
+        .chain(too_big.into_iter())
+        .map(Str::from)
+        .collect();
+    v.sort();
+    v
 }
 
 fn main() {
