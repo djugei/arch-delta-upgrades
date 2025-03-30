@@ -48,7 +48,7 @@ pub fn get_db_path() -> PathBuf {
     basepath
 }
 fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::fmt().compact().without_time().init();
     fn get_env_or_fallback<S: Into<Str>>(key: &str, fallback: S) -> Str {
         std::env::var(key).map(String::into_boxed_str).unwrap_or_else(|_e| {
             let fallback: Str = fallback.into();
