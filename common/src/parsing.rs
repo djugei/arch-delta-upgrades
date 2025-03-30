@@ -2,7 +2,7 @@ use thiserror::Error;
 
 type Str = Box<str>;
 
-#[derive(Debug, Eq, PartialOrd, Ord, Hash, Clone)]
+#[derive(Debug, Eq, PartialOrd, Ord, Clone)]
 pub struct Package {
     name: Str,
     version: Str,
@@ -34,6 +34,14 @@ impl Package {
 impl PartialEq for Package {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.version == other.version && self.arch == other.arch
+    }
+}
+
+impl std::hash::Hash for Package {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.version.hash(state);
+        self.arch.hash(state);
     }
 }
 
