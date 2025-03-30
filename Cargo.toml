@@ -2,7 +2,8 @@
 members = ["client", "server", "common", "async_file_cache", "ruma-headers"]
 resolver = "2"
 
-
+[workspace.lints.clippy]
+clone-on-ref-ptr = "warn"
 
 [profile.dev.package."*"]
 # Set the default for dependencies in Development mode.
