@@ -17,3 +17,4 @@ ddelta = { git = "https://github.com/djugei/ddelta-rs" }
 indicatif = { git = "https://github.com/djugei/indicatif", branch = "heuristic" }
 hashbrown = { git = "https://github.com/djugei/hashbrown" }
 libalpm-rs = { git = "https://github.com/djugei/libalpm-rs" }
+env_logger = { git = "https://github.com/djugei/env_logger" }
