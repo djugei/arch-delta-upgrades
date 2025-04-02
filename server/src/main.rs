@@ -289,8 +289,8 @@ async fn gen_delta(
         ),
         GenDeltaError,
     > {
-        let from = Package::try_from(&*from)?;
-        let to = Package::try_from(&*to)?;
+        let from = Package::try_from(from)?;
+        let to = Package::try_from(to)?;
         if strsim::levenshtein(from.get_name(), to.get_name()) > 3 {
             return Err(GenDeltaError::Other("packages are too different".into()));
         }
@@ -313,7 +313,7 @@ async fn gen_delta(
         debug!("range: {range:?} for {delta:?}");
         let resp = axum_range::Ranged::new(range, body)
             .try_respond()
-            .map_err(|e| GenDeltaError::Range(e))?;
+            .map_err(GenDeltaError::Range)?;
 
         let mut h = HeaderMap::new();
         h.typed_insert(resp.content_length);

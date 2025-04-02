@@ -172,7 +172,7 @@ struct DBCacheSync {
 
 impl DBCache {
     pub fn new(name: Str, client: Client) -> Result<Self, DownloadError> {
-        let ts = common::find_latest_db(&*name, crate::get_db_path())?;
+        let ts = common::find_latest_db(&name, crate::get_db_path())?;
         let ts = ts.unwrap_or(0);
         let ts = SystemTimeExt::from_timestamp(ts);
         let s = DBCache {
@@ -261,7 +261,7 @@ impl DBCache {
 
             sync.last_check = now;
         }
-        return Ok(sync.last_sync);
+        Ok(sync.last_sync)
     }
 }
 
