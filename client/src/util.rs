@@ -2,7 +2,7 @@ use std::{collections::HashMap, io::Read, path::PathBuf};
 
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
-use common::Package;
+use common::{Delta, Package};
 use http::StatusCode;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
@@ -63,11 +63,13 @@ pub(crate) async fn do_boring_download(
     Ok(size)
 }
 
+type DeltaUpgradeCandidate = (Url, Delta, Mmap, u64);
+
 pub(crate) fn find_deltaupgrade_candidates(
     _global: &crate::GlobalState,
     blacklist: &[Str],
     _fuz: bool,
-) -> Result<(Vec<(String, Package, Package, Mmap, u64)>, Vec<Url>), anyhow::Error> {
+) -> Result<(Vec<DeltaUpgradeCandidate>, Vec<Url>), anyhow::Error> {
     let upgrades = libalpm_rs::upgrade_urls(&["core", "extra", "multilib"]);
 
     let mut direct_downloads = Vec::new();
@@ -81,7 +83,7 @@ pub(crate) fn find_deltaupgrade_candidates(
         }
         let i = old.i.borrow();
         let old_name = old.name.r(&i);
-        if (&blacklist).into_iter().any(|e| **e == *old_name) {
+        if blacklist.iter().any(|e| **e == *old_name) {
             info!("{old_name} is blacklisted, skipping");
             continue;
         }
@@ -116,7 +118,7 @@ pub(crate) fn find_deltaupgrade_candidates(
                 let new_filename = new.filename.unwrap().r(&i);
                 let newpkg = Package::try_from(new_filename)?;
 
-                deltas.push((url, newpkg, oldpkg, oldfile, (dec_size as u64)));
+                deltas.push((Url::parse(&url)?, Delta::try_from((oldpkg, newpkg))?, oldfile, dec_size));
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -124,12 +126,12 @@ pub(crate) fn find_deltaupgrade_candidates(
                     //TODO: re-add fuzzy logic
                     direct_downloads.push(Url::parse(&url)?);
                 } else {
-                    return Err(e)?;
+                    Err(e)?;
                 }
             }
         }
     }
-    return Ok((deltas, direct_downloads));
+    Ok((deltas, direct_downloads))
 }
 
 pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
@@ -245,11 +247,11 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         let filename: String = filename.into_string().unwrap();
         if filename.ends_with(".delta") {
             let (_old, new) = filename.rsplit_once(":to:").unwrap();
-            let pkg = Package::try_from(&*new).unwrap();
+            let pkg = Package::try_from(new).unwrap();
             let (name, version, arch, trailer) = pkg.destructure();
             assert_eq!(&*trailer, "delta");
             let len = line.metadata()?.len();
-            deltas.insert((name.into(), version.into(), arch.into()), len);
+            deltas.insert((name, version, arch), len);
         } else if filename.ends_with(".pkg.tar.zst") {
             let (name, version, arch, _trailer) = Package::try_from(filename.as_str())
                 .expect("weird pkg file name")
@@ -278,10 +280,9 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     }
     let mut unmatched = 0;
     for ((name, version, arch), len) in pkgs.drain() {
-        if log::log_enabled!(log::Level::Trace) {
-            if !deltas.contains_key(&(name.clone(), version.clone(), arch.clone())) {
-                trace!("pkg: {name} {version} {arch} unmatched");
-            }
+        if log::log_enabled!(log::Level::Trace) && !deltas.contains_key(&(name.clone(), version.clone(), arch.clone()))
+        {
+            trace!("pkg: {name} {version} {arch} unmatched");
         }
         if let Some(((name, _version, _arch), dlen)) = deltas.remove_entry(&(name, version, arch)) {
             pairs

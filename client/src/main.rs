@@ -113,11 +113,7 @@ fn default_blacklist() -> Vec<Str> {
         "rocblas",
     ];
 
-    let mut v: Vec<_> = bad_compress
-        .into_iter()
-        .chain(too_big.into_iter())
-        .map(Str::from)
-        .collect();
+    let mut v: Vec<_> = bad_compress.into_iter().chain(too_big).map(Str::from).collect();
     v.sort();
     v
 }
@@ -298,17 +294,18 @@ async fn do_upgrade(
 
     let localset = tokio::task::LocalSet::new();
     let mut set = JoinSet::new();
-    for (url, newpkg, oldpkg, oldfile, dec_size) in upgrade_candidates {
+    for (url, delta, oldfile, dec_size) in upgrade_candidates {
+        let (oldpkg, newpkg) = delta.get_both();
         let get_delta_f = get_delta(
             global.clone(),
             newpkg.clone(),
             oldpkg.clone(),
             oldfile,
-            dec_size.clone(),
+            dec_size,
             delta_cache.clone(),
             server.clone(),
         );
-        let get_sig_f = get_signature(url.into(), global.client.clone(), delta_cache.clone(), newpkg.clone());
+        let get_sig_f = get_signature(url, global.client.clone(), delta_cache.clone(), newpkg.clone());
 
         set.spawn_local_on(
             async move {
@@ -331,7 +328,7 @@ async fn do_upgrade(
             let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
             let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
             let pkg = Package::try_from(name).unwrap();
-            let get_sig_f = get_signature(url.as_str().into(), global.client.clone(), delta_cache.clone(), pkg);
+            let get_sig_f = get_signature(url, global.client.clone(), delta_cache.clone(), pkg);
             dlset.spawn_local_on(
                 async move {
                     let (f, s) = tokio::join!(boring_dl, get_sig_f);
@@ -368,7 +365,9 @@ async fn do_upgrade(
                 deltasize += d;
                 newsize += n;
                 if let Some(c) = c {
-                    comptime.as_mut().map(|sum: &mut Duration| *sum += c);
+                    if let Some(comptime) = &mut comptime {
+                        *comptime += c
+                    }
                 }
             }
         }
@@ -495,7 +494,7 @@ async fn get_delta(
     Ok((deltasize, newsize, comptime))
 }
 
-async fn get_signature(url: Str, client: Client, delta_cache: PathBuf, newpkg: Package) -> Result<(), anyhow::Error> {
+async fn get_signature(url: Url, client: Client, delta_cache: PathBuf, newpkg: Package) -> Result<(), anyhow::Error> {
     let mut sigfile = delta_cache.clone();
     sigfile.push(format!("{newpkg}.sig"));
     let mut sigfile = match tokio::fs::OpenOptions::new()
@@ -519,11 +518,11 @@ async fn get_signature(url: Str, client: Client, delta_cache: PathBuf, newpkg: P
 }
 
 trait ResultSwap<T, E> {
-    fn swap(self: Self) -> Result<E, T>;
+    fn swap(self) -> Result<E, T>;
 }
 
 impl<T, E> ResultSwap<T, E> for Result<T, E> {
-    fn swap(self: Self) -> Result<E, T> {
+    fn swap(self) -> Result<E, T> {
         match self {
             Ok(t) => Err(t),
             Err(e) => Ok(e),
@@ -548,7 +547,12 @@ fn gen_delta(orig: &Path, new: &Path, patch: &Path) -> Result<(), std::io::Error
     let newb_len = newb.len();
     let mut newb = Cursor::new(newb);
 
-    let patch = OpenOptions::new().write(true).create(true).open(patch).unwrap();
+    let patch = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(patch)
+        .unwrap();
     let mut patch = zstd::Encoder::new(patch, 22)?;
 
     let before = memory_stats::memory_stats().unwrap().physical_mem;
@@ -641,7 +645,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
 
         // gotta drain stdout into file while at the same time writing into stdin
         // otherwise the internal buffer of stdin/out is full and it deadlocks
-        let mut new_f = OpenOptions::new().write(true).create(true).open(new)?;
+        let mut new_f = OpenOptions::new().write(true).create(true).truncate(false).open(new)?;
         let handle = std::thread::spawn(move || -> std::io::Result<()> {
             std::io::copy(&mut stdout, &mut new_f)?;
             Ok(())
