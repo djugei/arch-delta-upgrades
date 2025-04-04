@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.lints.clippy]
 clone-on-ref-ptr = "warn"
+join-absolute-paths = "warn"
 
 [profile.dev.package."*"]
 # Set the default for dependencies in Development mode.
