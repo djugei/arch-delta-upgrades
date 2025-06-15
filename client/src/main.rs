@@ -156,9 +156,7 @@ fn main() {
             only_delta,
         } => {
             renice();
-            let db = libalpm_rs::db::DBLock::new().unwrap();
             full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta);
-            std::mem::drop(db)
         }
         Commands::Download {
             server,
@@ -225,6 +223,7 @@ fn full_upgrade(
     only_delta: bool,
 ) {
     let runtime = mkruntime();
+    let db;
     if pacman_sync {
         info!("running pacman -Sy");
         let exit = Command::new("pacman")
@@ -236,7 +235,9 @@ fn full_upgrade(
         if !exit.success() {
             panic!("pacman -Sy failed, aborting");
         }
+        db = libalpm_rs::db::DBLock::new().unwrap();
     } else {
+        db = libalpm_rs::db::DBLock::new().unwrap();
         info!("syncing databases");
         runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
@@ -250,6 +251,7 @@ fn full_upgrade(
             panic!("{e}")
         }
     };
+    std::mem::drop(db);
     info!("running pacman -Su to install updates");
     let exit = Command::new("pacman")
         .args(["-Su", "--noconfirm"])
