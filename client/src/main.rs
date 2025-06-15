@@ -156,7 +156,9 @@ fn main() {
             only_delta,
         } => {
             renice();
-            full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta)
+            let db = libalpm_rs::db::DBLock::new().unwrap();
+            full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta);
+            std::mem::drop(db)
         }
         Commands::Download {
             server,
@@ -165,14 +167,18 @@ fn main() {
             only_delta,
         } => {
             renice();
+            let db = libalpm_rs::db::DBLock::new().unwrap();
             std::fs::create_dir_all(&delta_cache).unwrap();
             mkruntime()
                 .block_on(do_upgrade(global, server, vec![], delta_cache, !no_fuz, only_delta))
                 .unwrap();
+            std::mem::drop(db)
         }
         Commands::Sync { server } => {
             renice();
+            let db = libalpm_rs::db::DBLock::new().unwrap();
             mkruntime().block_on(sync(global, server)).unwrap();
+            std::mem::drop(db)
         }
         Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
     }
