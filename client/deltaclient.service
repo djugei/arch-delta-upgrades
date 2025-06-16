@@ -8,6 +8,6 @@ ConditionCPUPressure = 10%/5min
 Type = oneshot
 ExecStart = /usr/bin/deltaclient sync http://bogen.moeh.re/
 # as long as sync can't run without root we dl straight to pacman cache
-ExecStart = /usr/bin/deltaclient download --no-fuz --only-delta http://bogen.moeh.re/ /var/cache/pacman/pkg/
+ExecStart = /usr/bin/deltaclient -v download --no-fuz --only-delta http://bogen.moeh.re/ /var/cache/pacman/pkg/
 RemainAfterExit = no
 

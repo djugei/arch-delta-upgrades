@@ -21,8 +21,16 @@ use tokio::{io::AsyncWriteExt, sync::Semaphore, task::JoinSet};
 
 type Str = Box<str>;
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Parser)]
 #[command(version, about)]
+struct Args {
+    #[command(flatten)]
+    verbose: clap_verbosity_flag::Verbosity<clap_verbosity_flag::InfoLevel>,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Subcommand, Debug)]
 enum Commands {
     /// Run an entire upgrade, calling pacman internally, needs sudo to run.
     Upgrade {
@@ -119,12 +127,13 @@ fn default_blacklist() -> Vec<Str> {
 }
 
 fn main() {
-    //TODO: if set use the environment variable, else check the command line for -v flags (-v=debug -vv=trace -q=warn -qq=error).
-    //      make a struct Cmd { verbosity: u8, task: Command}.
-    //      Can utilize clap_verbosity_flag for this.
-    //
+    let args = Args::parse();
+
     // Set up a logger that does not conflict with progress bars
-    let logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
+    let logger = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(args.verbose.log_level().map(|l| l.as_str()).unwrap_or("error")),
+    )
+    .build();
     let multi = MultiProgress::new();
     let level = logger.filter();
 
@@ -133,11 +142,9 @@ fn main() {
         .expect("initializing logger failed");
     log::set_max_level(level);
 
-    let args = Commands::parse();
-
     let global = GlobalState::new(multi.clone(), 5, 1);
 
-    match args {
+    match args.command {
         #[cfg(feature = "diff")]
         Commands::Delta { orig, new, patch } => {
             gen_delta(&orig, &new, &patch).unwrap();

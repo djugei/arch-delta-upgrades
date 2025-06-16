@@ -32,6 +32,7 @@ flate2 = { version = "*" }
 libalpm-rs = "*"
 memory-stats = { version = "*", optional = true }
 libc = "*"
+clap-verbosity-flag = "3.0.3"
 
 [[bin]]
 name = "deltaclient"
