@@ -109,7 +109,6 @@ where
     where
         W: AsyncWrite + AsyncSeek + Unpin,
     {
-        //TODO: progress bar handling
         let write_offset = target.seek(std::io::SeekFrom::End(0)).await?;
         pg.set_position(write_offset);
         let mut body = get_header(limits, client, pg, url, 0).await?;

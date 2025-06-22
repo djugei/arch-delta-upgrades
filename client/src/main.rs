@@ -425,7 +425,11 @@ impl GlobalState {
         let parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         trace!("setting cpu parallelity to {parallel}");
         let maxpar_cpu = Arc::new(Semaphore::new(parallel));
-        let client = reqwest::Client::new();
+        let client = reqwest::ClientBuilder::default()
+            .tcp_user_timeout(Duration::from_secs(5 * 60))
+            .read_timeout(Duration::from_secs(3 * 60))
+            .build()
+            .unwrap();
 
         let total_pg = ProgressBar::new(0).with_style(
             ProgressStyle::with_template("#### total: [{wide_bar}] ~{bytes}/{total_bytes} elapsed: {elapsed} ####")
