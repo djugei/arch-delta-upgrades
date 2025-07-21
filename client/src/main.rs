@@ -34,6 +34,7 @@ struct Args {
 enum Commands {
     /// Run an entire upgrade, calling pacman internally, needs sudo to run.
     Upgrade {
+        #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
         #[arg( default_values_t = default_blacklist() )]
         blacklist: Vec<Str>,
@@ -52,7 +53,10 @@ enum Commands {
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: target directory/rootless mode
-    Sync { server: Url },
+    Sync {
+        #[arg(default_value = "http://bogen.moeh.re/")]
+        server: Url,
+    },
     /// Download the newest packages to the provided delta_cache path
     ///
     /// If delta_cache is somewhere you can write, no sudo is needed.
@@ -74,7 +78,9 @@ enum Commands {
     /// If you are doing a full sysupgrade try the upgrade subcommand for more comfort.
     #[command(verbatim_doc_comment)]
     Download {
+        #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
+        #[arg(default_value = "/var/cache/pacman/pkg/")]
         delta_cache: PathBuf,
         /// Disable fuzzy search if an exact package can not be found.
         /// This might find renames like -qt5 to -qt6
