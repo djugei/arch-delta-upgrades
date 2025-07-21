@@ -13,7 +13,6 @@ use std::{
     io::{Cursor, ErrorKind},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -56,6 +55,7 @@ enum Commands {
     Sync {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
+        target_dir: Option<PathBuf>,
     },
     /// Download the newest packages to the provided delta_cache path
     ///
@@ -80,8 +80,7 @@ enum Commands {
     Download {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
-        #[arg(default_value = "/var/cache/pacman/pkg/")]
-        delta_cache: PathBuf,
+        delta_cache: Option<PathBuf>,
         /// Disable fuzzy search if an exact package can not be found.
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
@@ -148,7 +147,7 @@ fn main() {
         .expect("initializing logger failed");
     log::set_max_level(level);
 
-    let global = GlobalState::new(multi.clone(), 5, 1);
+    let mut global = GlobalState::new(multi.clone(), 5, 1);
 
     match args.command {
         #[cfg(feature = "diff")]
@@ -178,15 +177,21 @@ fn main() {
             only_delta,
         } => {
             renice();
+            if let Some(p) = delta_cache {
+                global.pacman_config.cache_dir = p;
+            }
             let db = libalpm_rs::db::DBLock::new().unwrap();
-            std::fs::create_dir_all(&delta_cache).unwrap();
+            std::fs::create_dir_all(&global.pacman_config.cache_dir).unwrap();
             mkruntime()
-                .block_on(do_upgrade(global, server, vec![], delta_cache, !no_fuz, only_delta))
+                .block_on(do_upgrade(global, server, vec![], !no_fuz, only_delta))
                 .unwrap();
             std::mem::drop(db)
         }
-        Commands::Sync { server } => {
+        Commands::Sync { server, target_dir } => {
             renice();
+            if let Some(t) = target_dir {
+                global.pacman_config.db_path = t;
+            }
             let db = libalpm_rs::db::DBLock::new().unwrap();
             mkruntime().block_on(sync(global, server)).unwrap();
             std::mem::drop(db)
@@ -254,16 +259,14 @@ fn full_upgrade(
         info!("syncing databases");
         runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
-    let cachepath = PathBuf::from_str("/var/cache/pacman/pkg").unwrap();
-    let (deltasize, newsize, comptime) = match runtime
-        .block_on(async move { do_upgrade(global, server, blacklist, cachepath, !no_fuz, only_delta).await })
-    {
-        Ok((d, n, c)) => (d, n, c),
-        Err(e) => {
-            error!("{e}");
-            panic!("{e}")
-        }
-    };
+    let (deltasize, newsize, comptime) =
+        match runtime.block_on(async move { do_upgrade(global, server, blacklist, !no_fuz, only_delta).await }) {
+            Ok((d, n, c)) => (d, n, c),
+            Err(e) => {
+                error!("{e}");
+                panic!("{e}")
+            }
+        };
     std::mem::drop(db);
     info!("running pacman -Su to install updates");
     let exit = Command::new("pacman")
@@ -302,7 +305,6 @@ async fn do_upgrade(
     global: GlobalState,
     server: Url,
     blacklist: Vec<Str>,
-    delta_cache: PathBuf,
     fuz: bool,
     only_delta: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
@@ -323,10 +325,9 @@ async fn do_upgrade(
             oldpkg.clone(),
             oldfile,
             dec_size,
-            delta_cache.clone(),
             server.clone(),
         );
-        let get_sig_f = get_signature(url, global.client.clone(), delta_cache.clone(), newpkg.clone());
+        let get_sig_f = get_signature(global.clone(), url, newpkg.clone());
 
         set.spawn_local_on(
             async move {
@@ -346,10 +347,10 @@ async fn do_upgrade(
     let mut dlset = JoinSet::new();
     if !only_delta {
         for url in downloads {
-            let boring_dl = util::do_boring_download(global.clone(), url.clone(), delta_cache.clone());
+            let boring_dl = util::do_boring_download(global.clone(), url.clone());
             let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
             let pkg = Package::try_from(name).unwrap();
-            let get_sig_f = get_signature(url, global.client.clone(), delta_cache.clone(), pkg);
+            let get_sig_f = get_signature(global.clone(), url, pkg);
             dlset.spawn_local_on(
                 async move {
                     let (f, s) = tokio::join!(boring_dl, get_sig_f);
@@ -422,6 +423,7 @@ pub(crate) struct GlobalState {
     maxpar_dl: Arc<Semaphore>,
     maxpar_cpu: Arc<Semaphore>,
     client: Client,
+    pacman_config: libalpm_rs::config::PacmanConfig,
 }
 
 impl GlobalState {
@@ -445,6 +447,8 @@ impl GlobalState {
         total_pg.tick();
         total_pg.enable_steady_tick(Duration::from_millis(100));
 
+        let pacman_config = libalpm_rs::config::extract_relevant_config();
+
         Self {
             multi,
             total_pg,
@@ -452,6 +456,7 @@ impl GlobalState {
             maxpar_dl,
             maxpar_cpu,
             client,
+            pacman_config,
         }
     }
 
@@ -471,11 +476,10 @@ async fn get_delta(
     oldpkg: Package,
     oldfile: Mmap,
     mut dec_size: u64,
-    delta_cache: PathBuf,
     server: Url,
 ) -> Result<(u64, u64, Option<Duration>), anyhow::Error> {
     global.total_pg.inc_length(dec_size);
-    let mut file_name = delta_cache.clone();
+    let mut file_name = global.pacman_config.cache_dir.clone();
     file_name.push(newpkg.to_string());
     let delta = common::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
     let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
@@ -519,8 +523,8 @@ async fn get_delta(
     Ok((deltasize, newsize, comptime))
 }
 
-async fn get_signature(url: Url, client: Client, delta_cache: PathBuf, newpkg: Package) -> Result<(), anyhow::Error> {
-    let mut sigfile = delta_cache.clone();
+async fn get_signature(global: GlobalState, url: Url, newpkg: Package) -> Result<(), anyhow::Error> {
+    let mut sigfile = global.pacman_config.cache_dir;
     sigfile.push(format!("{newpkg}.sig"));
     let mut sigfile = match tokio::fs::OpenOptions::new()
         .write(true)
@@ -535,7 +539,7 @@ async fn get_signature(url: Url, client: Client, delta_cache: PathBuf, newpkg: P
     };
     let sigurl = format!("{url}.sig");
     debug!("getting signature from {}", url);
-    let mut res = client.get(&sigurl).send().await?.error_for_status()?;
+    let mut res = global.client.get(&sigurl).send().await?.error_for_status()?;
     while let Some(chunk) = res.chunk().await? {
         sigfile.write_all(&chunk).await?
     }

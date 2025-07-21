@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Read, path::PathBuf};
+use std::{collections::HashMap, io::Read};
 
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
@@ -16,8 +16,6 @@ use tokio::{
 };
 
 type Str = Box<str>;
-
-static PACMAN_CACHE: &str = "/var/cache/pacman/pkg/";
 
 pub(crate) fn progress_style() -> ProgressStyle {
     ProgressStyle::with_template("{prefix} {msg} [{wide_bar}] {bytes}/{total_bytes} {binary_bytes_per_sec} {eta}")
@@ -42,11 +40,7 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
         .map(|()| pg)
 }
 
-pub(crate) async fn do_boring_download(
-    global: crate::GlobalState,
-    url: Url,
-    mut target_dir: PathBuf,
-) -> Result<u64, common::DLError> {
+pub(crate) async fn do_boring_download(global: crate::GlobalState, url: Url) -> Result<u64, common::DLError> {
     let name = url.path_segments().and_then(Iterator::last).expect("malformed url");
     let pkg = Package::try_from(name).expect("invalid file name");
     let pg = ProgressBar::hidden()
@@ -54,11 +48,13 @@ pub(crate) async fn do_boring_download(
         .with_style(progress_style());
     let pg = global.multi.add(pg);
 
-    target_dir.push(name);
+    let limits = global.to_limits();
+
+    let target_dir = global.pacman_config.cache_dir.join(name);
     let target = tokio::fs::File::create(target_dir).await?;
 
     pin!(target);
-    common::dl_body(global.to_limits(), global.client, pg.clone(), url, &mut target).await?;
+    common::dl_body(limits, global.client, pg.clone(), url, &mut target).await?;
     let size = target.seek(std::io::SeekFrom::End(0)).await?;
     Ok(size)
 }
@@ -66,11 +62,11 @@ pub(crate) async fn do_boring_download(
 type DeltaUpgradeCandidate = (Url, Delta, Mmap, u64);
 
 pub(crate) fn find_deltaupgrade_candidates(
-    _global: &crate::GlobalState,
+    global: &crate::GlobalState,
     blacklist: &[Str],
     _fuz: bool,
 ) -> Result<(Vec<DeltaUpgradeCandidate>, Vec<Url>), anyhow::Error> {
-    let upgrades = libalpm_rs::upgrade_urls(&["core", "extra", "multilib"]);
+    let upgrades = libalpm_rs::upgrade_urls(&global.pacman_config, &["core", "extra", "multilib"]);
 
     let mut direct_downloads = Vec::new();
     let mut deltas = Vec::new();
@@ -89,8 +85,11 @@ pub(crate) fn find_deltaupgrade_candidates(
         }
         let old_version = old.version.r(&i);
         let old_arch = old.arch.as_str();
-        let cache_path = format!("{PACMAN_CACHE}/{old_name}-{old_version}-{old_arch}.pkg.tar.zst");
-        debug!("evaluating {cache_path}");
+        let cache_path = global
+            .pacman_config
+            .cache_dir
+            .join(format!("{old_name}-{old_version}-{old_arch}.pkg.tar.zst"));
+        debug!("evaluating {cache_path:?}");
         let cached = std::fs::File::open(cache_path);
         match cached {
             Ok(f) => {
@@ -137,7 +136,9 @@ pub(crate) fn find_deltaupgrade_candidates(
 pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
     //TODO use the same logic as the main delta downloads, including retries and progress bars
     info!("syncing {}", name);
-    let max = common::find_latest_db(&name, "/var/lib/pacman/sync/")?;
+    let mut syncpath = global.pacman_config.db_path.clone();
+    syncpath.push("sync");
+    let max = common::find_latest_db(&name, syncpath)?;
     if let Some(old_ts) = max {
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
@@ -212,14 +213,15 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
         let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
         let new_ts: u64 = new_ts.parse()?;
 
-        let new_p = format!("/var/lib/pacman/sync/{name}-{new_ts}");
+        let new_p = global.pacman_config.db_path.join(format!("{name}-{new_ts}"));
         let mut new = tokio::fs::File::create(&new_p).await?;
         while let Some(chunk) = response.chunk().await? {
             new.write_all(&chunk).await?;
         }
 
-        let db_p = format!("/var/lib/pacman/sync/{name}.db");
-        trace!("linking {new_p} to {db_p}");
+        let db_p = global.pacman_config.db_path.join(format!("{name}.db"));
+
+        trace!("linking {new_p:?} to {db_p:?}");
         let res = std::fs::remove_file(&db_p);
         if let Err(e) = res {
             // Not found is fine, just means the db does not exist yet
@@ -238,7 +240,8 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     let mut deltas: HashMap<(Str, Str, Str), u64> = HashMap::new();
     let mut pkgs: HashMap<(Str, Str, Str), u64> = HashMap::new();
     let mut pairs: HashMap<Str, (u64, u64, u64)> = HashMap::new();
-    for line in std::fs::read_dir(PACMAN_CACHE)? {
+    let config = libalpm_rs::config::extract_relevant_config();
+    for line in std::fs::read_dir(config.cache_dir)? {
         let line = line?;
         if !line.file_type()?.is_file() {
             continue;
@@ -393,7 +396,8 @@ fn test_dec_sizes() {
     use std::io::Seek;
     use std::os::unix::ffi::OsStrExt;
 
-    let dirents: Vec<_> = std::fs::read_dir(PACMAN_CACHE)
+    let config = libalpm_rs::config::extract_relevant_config();
+    let dirents: Vec<_> = std::fs::read_dir(config.cache_dir)
         .unwrap()
         .map(Result::unwrap)
         .filter(|line| line.file_type().unwrap().is_file() && line.file_name().as_bytes().ends_with(b".tar.zst"))
