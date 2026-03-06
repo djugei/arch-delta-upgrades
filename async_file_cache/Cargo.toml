@@ -10,7 +10,7 @@ license = "LGPL-3.0+"
 [dependencies]
 tokio = { version = "*", features = ["sync", "fs", "io-util", "macros"] }
 tracing = "*"
-hashbrown = "*"
+hashbrown = "0.17"
 
 [dev-dependencies]
 tempfile = "*"

@@ -21,9 +21,9 @@ futures-util = "*"
 listenfd = "*"
 
 axum =  { version = "*", features = [] }
-reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+reqwest = { version = "0.13", default-features = false, features = ["rustls"]}
 axum-range = "*"
-axum-extra = "*"
+axum-extra = { version = "*", features = ["typed-header"] }
 
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt"] }

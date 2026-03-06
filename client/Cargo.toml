@@ -11,8 +11,8 @@ rust-version = "1.85"
 [dependencies]
 ddelta = "*"
 zstd = { version = "*", features = ["zstdmt", "experimental"] }
-indicatif = { version = ">=0.17.0", features = ["tokio"] }
-reqwest = { version = "*", default-features = false, features = ["rustls-tls"]}
+indicatif = { version = "0.18.4", features = ["tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"]}
 http = "*"
 clap = { version = "*", features = ["derive"] }
 itertools = "*"
