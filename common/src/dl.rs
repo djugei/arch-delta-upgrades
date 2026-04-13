@@ -90,7 +90,7 @@ fn test_dl_body() {
         .build()
         .expect("could not build async runtime")
         .block_on(async {
-            let file = tokio::fs::File::create("lol").await.unwrap();
+            let file = tokio::fs::File::create("/tmp/lol").await.unwrap();
             let dl = dl_body(limit, client, pg, url, file).await;
             assert!(dl.is_err())
         })
