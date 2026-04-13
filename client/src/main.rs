@@ -10,13 +10,13 @@ use memmap2::Mmap;
 use reqwest::{Client, Url};
 use std::{
     fs::OpenOptions,
-    io::{Cursor, ErrorKind},
+    io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, sync::Semaphore, task::JoinSet};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 type Str = Box<str>;
 
@@ -45,10 +45,6 @@ enum Commands {
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
         no_fuz: bool,
-        /// Only do delta, downloads,
-        /// leave other upgrades to pacman
-        #[arg(long)]
-        only_delta: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: target directory/rootless mode
@@ -85,10 +81,6 @@ enum Commands {
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
         no_fuz: bool,
-        /// Only do delta, downloads,
-        /// leave other upgrades to pacman
-        #[arg(long)]
-        only_delta: bool,
     },
     /// Calculate and display some statistics about effectiveness of the delta-encoding
     Stats {
@@ -165,16 +157,14 @@ fn main() {
             pacman_sync,
             blacklist,
             no_fuz,
-            only_delta,
         } => {
             renice();
-            full_upgrade(global, server, pacman_sync, blacklist, no_fuz, only_delta);
+            full_upgrade(global, server, pacman_sync, blacklist, no_fuz);
         }
         Commands::Download {
             server,
             delta_cache,
             no_fuz,
-            only_delta,
         } => {
             renice();
             if let Some(p) = delta_cache {
@@ -183,7 +173,7 @@ fn main() {
             let db = libalpm_rs::db::DBLock::new().unwrap();
             std::fs::create_dir_all(&global.pacman_config.cache_dir).unwrap();
             mkruntime()
-                .block_on(do_upgrade(global, server, vec![], !no_fuz, only_delta))
+                .block_on(do_upgrade(global, server, vec![], !no_fuz))
                 .unwrap();
             std::mem::drop(db)
         }
@@ -232,14 +222,7 @@ async fn sync(global: GlobalState, server: Url) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn full_upgrade(
-    global: GlobalState,
-    server: Url,
-    pacman_sync: bool,
-    blacklist: Vec<Box<str>>,
-    no_fuz: bool,
-    only_delta: bool,
-) {
+fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: Vec<Box<str>>, no_fuz: bool) {
     let runtime = mkruntime();
     let db;
     if pacman_sync {
@@ -260,7 +243,7 @@ fn full_upgrade(
         runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
     let (deltasize, newsize, comptime) =
-        match runtime.block_on(async move { do_upgrade(global, server, blacklist, !no_fuz, only_delta).await }) {
+        match runtime.block_on(async move { do_upgrade(global, server, blacklist, !no_fuz).await }) {
             Ok((d, n, c)) => (d, n, c),
             Err(e) => {
                 error!("{e}");
@@ -306,18 +289,14 @@ async fn do_upgrade(
     server: Url,
     blacklist: Vec<Str>,
     fuz: bool,
-    only_delta: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    let (upgrade_candidates, downloads) = util::find_deltaupgrade_candidates(&global, &blacklist, fuz)?;
+    let upgrade_candidates = util::find_deltaupgrade_candidates(&global, &blacklist, fuz)?;
 
     info!("downloading {} delta updates", upgrade_candidates.len());
-    if !only_delta {
-        info!("downloading {} updates", downloads.len());
-    }
 
     let localset = tokio::task::LocalSet::new();
     let mut set = JoinSet::new();
-    for (url, delta, oldfile, dec_size) in upgrade_candidates {
+    for (_url, delta, oldfile, dec_size) in upgrade_candidates {
         let (oldpkg, newpkg) = delta.get_both();
         let get_delta_f = get_delta(
             global.clone(),
@@ -327,43 +306,16 @@ async fn do_upgrade(
             dec_size,
             server.clone(),
         );
-        let get_sig_f = get_signature(global.clone(), url, newpkg.clone());
 
         set.spawn_local_on(
             async move {
-                let (f, s) = tokio::join!(get_delta_f, get_sig_f);
+                let f = get_delta_f.await;
                 let f = f.context("creating delta file failed")?;
-                if let Err(e) = s.context("creating signature file failed") {
-                    error!("{e}");
-                    error!("continuing")
-                };
                 Ok::<_, anyhow::Error>(f)
             },
             &localset,
         );
         debug!("spawned task for {}", newpkg.get_name());
-    }
-
-    let mut dlset = JoinSet::new();
-    if !only_delta {
-        for url in downloads {
-            let boring_dl = util::do_boring_download(global.clone(), url.clone());
-            let name = url.path_segments().and_then(Iterator::last).context("malformed url")?;
-            let pkg = Package::try_from(name).unwrap();
-            let get_sig_f = get_signature(global.clone(), url, pkg);
-            dlset.spawn_local_on(
-                async move {
-                    let (f, s) = tokio::join!(boring_dl, get_sig_f);
-                    let f = f.context("boring dl failed")?;
-                    if let Err(e) = s.context("creating signature file failed") {
-                        error!("{e}");
-                        error!("continuing")
-                    };
-                    Ok::<_, anyhow::Error>(f)
-                },
-                &localset,
-            );
-        }
     }
 
     let mut deltasize = 0;
@@ -391,23 +343,6 @@ async fn do_upgrade(
                         *comptime += c
                     }
                 }
-            }
-        }
-    }
-
-    while let Some(res) = dlset.join_next().await {
-        match res.unwrap() {
-            Ok(s) => {
-                newsize += s;
-                deltasize += s
-            }
-            Err(e) => {
-                error!("{:?}", e);
-                for cause in e.chain() {
-                    error!("caused by: {:#}", cause);
-                }
-                error!("if the error is temporary, you can try running the command again");
-                lasterror = Some(e);
             }
         }
     }
@@ -521,29 +456,6 @@ async fn get_delta(
     let newsize = tokio::fs::File::open(&file_name).await?.metadata().await?.size();
     global.total_pg.inc(dec_size);
     Ok((deltasize, newsize, comptime))
-}
-
-async fn get_signature(global: GlobalState, url: Url, newpkg: Package) -> Result<(), anyhow::Error> {
-    let mut sigfile = global.pacman_config.cache_dir;
-    sigfile.push(format!("{newpkg}.sig"));
-    let mut sigfile = match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(sigfile)
-        .await
-    {
-        // the sigfile already exists, probably from a previous run, do nothing
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
-        Err(e) => return Err(anyhow::Error::from(e)),
-        Ok(f) => f,
-    };
-    let sigurl = format!("{url}.sig");
-    debug!("getting signature from {}", url);
-    let mut res = global.client.get(&sigurl).send().await?.error_for_status()?;
-    while let Some(chunk) = res.chunk().await? {
-        sigfile.write_all(&chunk).await?
-    }
-    Ok(())
 }
 
 trait ResultSwap<T, E> {

@@ -11,7 +11,7 @@ use memmap2::Mmap;
 use reqwest::Url;
 use ruma_headers::ContentDisposition;
 use tokio::{
-    io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt},
     pin,
 };
 
@@ -40,32 +40,13 @@ pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
         .map(|()| pg)
 }
 
-pub(crate) async fn do_boring_download(global: crate::GlobalState, url: Url) -> Result<u64, common::DLError> {
-    let name = url.path_segments().and_then(Iterator::last).expect("malformed url");
-    let pkg = Package::try_from(name).expect("invalid file name");
-    let pg = ProgressBar::hidden()
-        .with_message(format!("{}-{}", pkg.get_name(), pkg.get_version()))
-        .with_style(progress_style());
-    let pg = global.multi.add(pg);
-
-    let limits = global.to_limits();
-
-    let target_dir = global.pacman_config.cache_dir.join(name);
-    let target = tokio::fs::File::create(target_dir).await?;
-
-    pin!(target);
-    common::dl_body(limits, global.client, pg.clone(), url, &mut target).await?;
-    let size = target.seek(std::io::SeekFrom::End(0)).await?;
-    Ok(size)
-}
-
 type DeltaUpgradeCandidate = (Url, Delta, Mmap, u64);
 
 pub(crate) fn find_deltaupgrade_candidates(
     global: &crate::GlobalState,
     blacklist: &[Str],
     _fuz: bool,
-) -> Result<(Vec<DeltaUpgradeCandidate>, Vec<Url>), anyhow::Error> {
+) -> Result<Vec<DeltaUpgradeCandidate>, anyhow::Error> {
     let upgrades = libalpm_rs::upgrade_urls(&global.pacman_config, &["core", "extra", "multilib"]);
 
     let mut direct_downloads = Vec::new();
@@ -130,7 +111,7 @@ pub(crate) fn find_deltaupgrade_candidates(
             }
         }
     }
-    Ok((deltas, direct_downloads))
+    Ok(deltas)
 }
 
 pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
