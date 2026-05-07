@@ -245,7 +245,11 @@ async fn dbdelta(
             let body = Body::from_stream(ReaderStream::new(patch));
             Ok((StatusCode::OK, h, body))
         }
-        Err(caches::DeltaError::Identical) => Err((StatusCode::NOT_MODIFIED, "{name}-{ts} is up-to-date".into())),
+        Err(caches::DeltaError::Identical) => Err((StatusCode::NOT_MODIFIED, format!("{name}-{old} is up-to-date"))),
+        Err(caches::DeltaError::Uncached) => Err((
+            StatusCode::NOT_FOUND,
+            "old database version not cached on the server".into(),
+        )),
         //TODO the old version the client has may have already been expunged, that is a somewhat common case so better handle it gracefully.
         Err(e) => panic!("db delta generation failed: {e}"),
     }

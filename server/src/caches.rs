@@ -70,12 +70,14 @@ impl CacheState for PackageCache {
 pub enum DeltaError {
     #[error("could not download file: {0}")]
     Download(#[from] DownloadError),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
     #[error("generation error: {0}")]
     DeltaGen(#[from] ddelta::DiffError),
     #[error("identical versions")]
     Identical,
+    #[error("old version was not cached and could not be acquired")]
+    Uncached,
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct DeltaCache(pub FileCache<PackageCache>);
@@ -294,6 +296,14 @@ impl CacheState for DBCacheable {
         let newf = File::open(newp);
 
         let (oldf, newf) = tokio::join!(oldf, newf);
+
+        let oldf = oldf.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                DeltaError::Uncached
+            } else {
+                e.into()
+            }
+        });
         let oldf = oldf?.into_std().await;
         let newf = newf?.into_std().await;
         let patch = patch.into_std().await;
