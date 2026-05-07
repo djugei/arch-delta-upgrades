@@ -219,48 +219,49 @@ impl DBCache {
             now.duration_since(sync.last_check).unwrap_or_default() > std::time::Duration::from_secs(60);
 
         debug!(grouping = grouping_expired, pacing = pacing_expired, "time check");
-        if grouping_expired && pacing_expired {
-            let mirror = MIRROR.get().expect("initialized");
-            let uri = format!("{mirror}{0}/os/x86_64/{0}.db", self.cache.state().name);
-            debug!(uri = uri, "getting db");
-
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.typed_insert(IfModifiedSince::from(sync.last_sync));
-            let mut response = sync.client.get(&uri).headers(headers).send().await?;
-
-            // (some?) mirrors just happily start sending data even if the file is older.
-            // Check the response header and abort.
-            let is_cached = response
-                .headers()
-                .typed_get::<LastModified>()
-                .map(|modified| SystemTime::from(modified) <= sync.last_sync)
-                .unwrap_or(false);
-            let pseudo_not_modified = is_cached && response.status() == reqwest::StatusCode::OK;
-
-            if pseudo_not_modified || response.status() == reqwest::StatusCode::NOT_MODIFIED {
-                // No updates in the last interval
-                debug!(uri, "not modified");
-                if pseudo_not_modified {
-                    debug!(uri, "mirror has bad http compliance");
-                }
-            } else if response.status() == reqwest::StatusCode::OK {
-                // db has been updated, update our local copy
-                let path = now.to_path(&self.cache.state().name);
-                debug!(uri, "updating stored db {:?}", &path);
-                let mut file = File::create(path).await?;
-                while let Some(mut chunk) = response.chunk().await? {
-                    file.write_all_buf(&mut chunk).await?;
-                }
-                sync.last_sync = now;
-            } else {
-                return Err(DownloadError::Status {
-                    url: response.url().clone(),
-                    status: response.status(),
-                });
-            }
-
-            sync.last_check = now;
+        if !(grouping_expired && pacing_expired) {
+            return Ok(sync.last_sync);
         }
+        let mirror = MIRROR.get().expect("initialized");
+        let uri = format!("{mirror}{0}/os/x86_64/{0}.db", self.cache.state().name);
+        debug!(uri = uri, "getting db");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.typed_insert(IfModifiedSince::from(sync.last_sync));
+        let mut response = sync.client.get(&uri).headers(headers).send().await?;
+
+        // (some?) mirrors just happily start sending data even if the file is older.
+        // Check the response header and abort.
+        let is_cached = response
+            .headers()
+            .typed_get::<LastModified>()
+            .map(|modified| SystemTime::from(modified) <= sync.last_sync)
+            .unwrap_or(false);
+        let pseudo_not_modified = is_cached && response.status() == reqwest::StatusCode::OK;
+
+        if pseudo_not_modified || response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            // No updates in the last interval
+            debug!(uri, "not modified");
+            if pseudo_not_modified {
+                debug!(uri, "mirror has bad http compliance");
+            }
+        } else if response.status() == reqwest::StatusCode::OK {
+            // db has been updated, update our local copy
+            let path = now.to_path(&self.cache.state().name);
+            debug!(uri, "updating stored db {:?}", &path);
+            let mut file = File::create(path).await?;
+            while let Some(mut chunk) = response.chunk().await? {
+                file.write_all_buf(&mut chunk).await?;
+            }
+            sync.last_sync = now;
+        } else {
+            return Err(DownloadError::Status {
+                url: response.url().clone(),
+                status: response.status(),
+            });
+        }
+
+        sync.last_check = now;
         Ok(sync.last_sync)
     }
 }
