@@ -121,12 +121,19 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
     syncpath.push("sync");
     let max = common::find_latest_db(&name, syncpath)?;
     if let Some(old_ts) = max {
+        let old_p = format!("/var/lib/pacman/sync/{name}-{old_ts}");
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
         let response = global.client.get(url).send().await?;
         if response.status() == StatusCode::NOT_MODIFIED {
             info!("{name} is unchanged");
             return Ok(());
+        }
+        if response.status() == StatusCode::NOT_FOUND {
+            info!("server does not have {name}-{old_ts}, do full download");
+            debug!("removing {old_p}");
+            std::fs::remove_file(old_p)?;
+            return download_db(global, server, name).await;
         }
         assert!(response.status().is_success(), "{}", response.status());
         let header = response
@@ -149,7 +156,6 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
                 debug!("patching {name} from {old_ts} to {new_ts}");
                 let mut patch = zstd::Decoder::new(patch)?;
 
-                let old_p = format!("/var/lib/pacman/sync/{name}-{old_ts}");
                 let old = std::fs::File::open(&old_p)?;
                 let mut old = flate2::read::GzDecoder::new(old);
                 let mut oldv = Vec::new();
@@ -180,39 +186,40 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
         }
     } else {
         info!("no timestamped db found, do full download");
-        //TODO: maybe share this block between the two branches
-        let url = server.join(&format!("{name}"))?;
-        let mut response = global.client.get(url).send().await?;
-        assert!(response.status().is_success());
-        let header = response
-            .headers()
-            .get("content-disposition")
-            .context("missing content disposition header")?;
-        let patchname = ContentDisposition::try_from(header.as_bytes())?
-            .filename
-            .context("response has no filename")?;
-        let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
-        let new_ts: u64 = new_ts.parse()?;
-
-        let new_p = global.pacman_config.db_path.join(format!("{name}-{new_ts}"));
-        let mut new = tokio::fs::File::create(&new_p).await?;
-        while let Some(chunk) = response.chunk().await? {
-            new.write_all(&chunk).await?;
-        }
-
-        let db_p = global.pacman_config.db_path.join(format!("{name}.db"));
-
-        trace!("linking {new_p:?} to {db_p:?}");
-        let res = std::fs::remove_file(&db_p);
-        if let Err(e) = res {
-            // Not found is fine, just means the db does not exist yet
-            if e.kind() != std::io::ErrorKind::NotFound {
-                bail!(e);
-            }
-        }
-        std::os::unix::fs::symlink(new_p, db_p)?;
-        info!("finished downloading {name} at {new_ts}");
+        download_db(global, server, name).await?;
     }
+    Ok(())
+}
+
+async fn download_db(global: crate::GlobalState, server: Url, name: Box<str>) -> Result<(), anyhow::Error> {
+    let url = server.join(&format!("{name}"))?;
+    let mut response = global.client.get(url).send().await?;
+    assert!(response.status().is_success());
+    let header = response
+        .headers()
+        .get("content-disposition")
+        .context("missing content disposition header")?;
+    let patchname = ContentDisposition::try_from(header.as_bytes())?
+        .filename
+        .context("response has no filename")?;
+    let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
+    let new_ts: u64 = new_ts.parse()?;
+    let new_p = global.pacman_config.db_path.join(format!("{name}-{new_ts}"));
+    let mut new = tokio::fs::File::create(&new_p).await?;
+    while let Some(chunk) = response.chunk().await? {
+        new.write_all(&chunk).await?;
+    }
+    let db_p = global.pacman_config.db_path.join(format!("{name}.db"));
+    trace!("linking {new_p:?} to {db_p:?}");
+    let res = std::fs::remove_file(&db_p);
+    if let Err(e) = res {
+        // Not found is fine, just means the db does not exist yet
+        if e.kind() != std::io::ErrorKind::NotFound {
+            bail!(e);
+        }
+    }
+    std::os::unix::fs::symlink(new_p, db_p)?;
+    info!("finished downloading {name} at {new_ts}");
     Ok(())
 }
 
