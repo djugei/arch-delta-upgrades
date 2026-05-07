@@ -117,11 +117,9 @@ pub(crate) fn find_deltaupgrade_candidates(
 pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyhow::Result<()> {
     //TODO use the same logic as the main delta downloads, including retries and progress bars
     info!("syncing {}", name);
-    let mut syncpath = global.pacman_config.db_path.clone();
-    syncpath.push("sync");
-    let max = common::find_latest_db(&name, syncpath)?;
+    let max = common::find_latest_db(&name, &global.db_sync_path)?;
     if let Some(old_ts) = max {
-        let old_p = format!("/var/lib/pacman/sync/{name}-{old_ts}");
+        let old_p = global.db_sync_path.join(format!("{name}-{old_ts}"));
         debug!("upgrading {name} from {old_ts}");
         let url = server.join(&format!("{name}/{old_ts}"))?;
         let response = global.client.get(url).send().await?;
@@ -131,7 +129,7 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
         }
         if response.status() == StatusCode::NOT_FOUND {
             info!("server does not have {name}-{old_ts}, do full download");
-            debug!("removing {old_p}");
+            debug!("removing {old_p:?}");
             std::fs::remove_file(old_p)?;
             return download_db(global, server, name).await;
         }
@@ -162,7 +160,7 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
                 old.read_to_end(&mut oldv)?;
                 let mut old = std::io::Cursor::new(oldv);
 
-                let new_p = format!("/var/lib/pacman/sync/{name}-{new_ts}");
+                let new_p = global.db_sync_path.join(format!("{name}-{new_ts}"));
                 let new = std::fs::File::create(&new_p)?;
                 let mut new = flate2::write::GzEncoder::new(new, flate2::Compression::default());
 
@@ -170,12 +168,12 @@ pub async fn sync_db(global: crate::GlobalState, server: Url, name: Str) -> anyh
 
                 info!("finished patching {name} to {new_ts}");
 
-                trace!("linking {new_p} to db");
-                let db_p = format!("/var/lib/pacman/sync/{name}.db");
+                trace!("linking {new_p:?} to db");
+                let db_p = global.db_sync_path.join(format!("{name}.db"));
                 std::fs::remove_file(&db_p)?;
                 std::os::unix::fs::symlink(new_p, db_p)?;
 
-                trace!("deleting obsolete db {old_p}");
+                trace!("deleting obsolete db {old_p:?}");
                 std::fs::remove_file(old_p)?;
 
                 Ok(())
@@ -204,12 +202,12 @@ async fn download_db(global: crate::GlobalState, server: Url, name: Box<str>) ->
         .context("response has no filename")?;
     let (_, new_ts) = patchname.rsplit_once('-').context("malformed http filename")?;
     let new_ts: u64 = new_ts.parse()?;
-    let new_p = global.pacman_config.db_path.join(format!("{name}-{new_ts}"));
+    let new_p = global.db_sync_path.join(format!("{name}-{new_ts}"));
     let mut new = tokio::fs::File::create(&new_p).await?;
     while let Some(chunk) = response.chunk().await? {
         new.write_all(&chunk).await?;
     }
-    let db_p = global.pacman_config.db_path.join(format!("{name}.db"));
+    let db_p = global.db_sync_path.join(format!("{name}.db"));
     trace!("linking {new_p:?} to {db_p:?}");
     let res = std::fs::remove_file(&db_p);
     if let Err(e) = res {

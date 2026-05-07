@@ -51,7 +51,7 @@ enum Commands {
     Sync {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
-        target_dir: Option<PathBuf>,
+        target_dir: Option<Box<Path>>,
     },
     /// Download the newest packages to the provided delta_cache path
     ///
@@ -180,7 +180,7 @@ fn main() {
         Commands::Sync { server, target_dir } => {
             renice();
             if let Some(t) = target_dir {
-                global.pacman_config.db_path = t;
+                global.db_sync_path = t;
             }
             let db = libalpm_rs::db::DBLock::new().unwrap();
             mkruntime().block_on(sync(global, server)).unwrap();
@@ -370,6 +370,9 @@ pub(crate) struct GlobalState {
     maxpar_cpu: Arc<Semaphore>,
     client: Client,
     pacman_config: libalpm_rs::config::PacmanConfig,
+    /// by default this is /var/lib/pacman/sync
+    /// but can be altered through pacman.conf or command line parameters
+    db_sync_path: Box<Path>,
 }
 
 impl GlobalState {
@@ -394,6 +397,8 @@ impl GlobalState {
         total_pg.enable_steady_tick(Duration::from_millis(100));
 
         let pacman_config = libalpm_rs::config::extract_relevant_config();
+        let db_sync_path = pacman_config.db_path.join("sync").join("").into();
+        debug!("db sync path is {:?}", db_sync_path);
 
         Self {
             multi,
@@ -403,6 +408,7 @@ impl GlobalState {
             maxpar_cpu,
             client,
             pacman_config,
+            db_sync_path,
         }
     }
 

@@ -9,6 +9,7 @@ license = "LGPL-3.0+"
 
 [dependencies]
 thiserror = "*"
+log = "*"
 
 reqwest = "0.13"
 tokio = { version = "*", features = ["sync"] }
