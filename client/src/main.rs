@@ -170,7 +170,7 @@ fn main() {
             if let Some(p) = delta_cache {
                 global.pacman_config.cache_dir = p;
             }
-            let db = libalpm_rs::db::DBLock::new().unwrap();
+            let db = libalpm_rs::db::DBLock::new().expect("cache locked");
             std::fs::create_dir_all(&global.pacman_config.cache_dir).unwrap();
             mkruntime()
                 .block_on(do_upgrade(global, server, vec![], !no_fuz))
@@ -182,7 +182,7 @@ fn main() {
             if let Some(t) = target_dir {
                 global.db_sync_path = t;
             }
-            let db = libalpm_rs::db::DBLock::new().unwrap();
+            let db = libalpm_rs::db::DBLock::new().expect("cache locked");
             mkruntime().block_on(sync(global, server)).unwrap();
             std::mem::drop(db)
         }
@@ -247,9 +247,9 @@ fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: 
         if !exit.success() {
             panic!("pacman -Sy failed, aborting");
         }
-        db = libalpm_rs::db::DBLock::new().unwrap();
+        db = libalpm_rs::db::DBLock::new().expect("cache locked");
     } else {
-        db = libalpm_rs::db::DBLock::new().unwrap();
+        db = libalpm_rs::db::DBLock::new().expect("cache locked");
         info!("syncing databases");
         runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
