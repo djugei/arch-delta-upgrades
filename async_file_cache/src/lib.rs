@@ -101,8 +101,7 @@ impl<State: CacheState> FileCache<State> {
                             // Sender has been dropped which means either the generation function
                             // panicked internally or the whole future has been dropped in flight.
                             // We need to remove the entry and file and try again.
-
-                            //FIXME: doesn't this file need to be deleted while locking the hashmap?
+                            let mut in_flight = self.in_flight.lock().await;
                             if let Err(e) = tokio::fs::remove_file(path).await {
                                 // Not found is fine that is what we want
                                 if e.kind() != ErrorKind::NotFound {
@@ -111,10 +110,9 @@ impl<State: CacheState> FileCache<State> {
                             };
                             // I hope this locking logic is sound:
                             // if multiple threads detect a crashed channel then only the first
-                            // once has an equal channel
+                            // one has an equal channel
                             // other ones get either an empty entry or a new entry with a different
                             // channel
-                            let mut in_flight = self.in_flight.lock().await;
                             if let EntryRef::Occupied(entry) = (*in_flight).entry_ref(&key) {
                                 if e.same_channel(entry.get()) {
                                     entry.remove();

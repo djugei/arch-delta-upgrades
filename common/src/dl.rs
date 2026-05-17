@@ -97,7 +97,7 @@ fn test_dl_body() {
         })
 }
 
-/// downloads a file from url, writes into target
+/// downloads a file from url, appends to target
 //TODO: return number of bytes loaded
 pub async fn dl_body<W>(limits: Limits, client: Client, pg: ProgressBar, url: Url, target: W) -> Result<(), DLError>
 where

@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::{fs::rename, sync::Semaphore, task::JoinSet};
 
 type Str = Box<str>;
 
@@ -434,12 +434,13 @@ async fn get_delta(
     let mut file_name = global.pacman_config.cache_dir.clone();
     file_name.push(newpkg.to_string());
     let delta = common::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
+    let deltafile_part_name = file_name.with_file_name(format!("{delta}.delta.part"));
     let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
     let mut deltafile = tokio::fs::File::options()
         .write(true)
         .truncate(false)
         .create(true)
-        .open(deltafile_name.clone())
+        .open(&deltafile_part_name)
         .await
         .unwrap();
     let url = server.join(&format!("/arch/{oldpkg}/{newpkg}"))?;
@@ -449,23 +450,28 @@ async fn get_delta(
         deltafile_name.display(),
         pg.elapsed().as_secs_f64()
     );
+    // Download succeeded, rename to final file name
+    rename(deltafile_part_name, &deltafile_name).await?;
+
     global.total_pg.inc(dec_size / 2);
     // To not lose 1 in case of integer division round-down
     dec_size -= dec_size / 2;
     let comptime;
     {
-        let file_name = file_name.clone();
+        let file_part_name = file_name.with_added_extension(".part");
         let p_pg = ProgressBar::new(0);
         let p_pg = global.multi.insert_after(&pg, p_pg);
         pg.finish_and_clear();
         global.multi.remove(&pg);
         let guard_cpu = global.maxpar_cpu.acquire_owned().await;
+        let file_part_name_ = file_part_name.clone();
         comptime = tokio::task::spawn_blocking(move || -> Result<_, _> {
             let oldfile = Cursor::new(oldfile);
             let oldfile = zstd::decode_all(oldfile).unwrap();
-            apply_patch(&oldfile, &deltafile_name, &file_name, p_pg)
+            apply_patch(&oldfile, &deltafile_name, &file_part_name_, p_pg)
         })
         .await??;
+        rename(file_part_name, &file_name).await?;
         drop(guard_cpu);
     }
     use std::os::unix::fs::MetadataExt;
@@ -604,7 +610,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
 
         // gotta drain stdout into file while at the same time writing into stdin
         // otherwise the internal buffer of stdin/out is full and it deadlocks
-        let mut new_f = OpenOptions::new().write(true).create(true).truncate(false).open(new)?;
+        let mut new_f = OpenOptions::new().write(true).create(true).truncate(true).open(new)?;
         let handle = std::thread::spawn(move || -> std::io::Result<()> {
             std::io::copy(&mut stdout, &mut new_f)?;
             Ok(())
