@@ -69,6 +69,7 @@ impl Limits {
     }
     pub fn unlimited() -> Self {
         Self {
+            // todo: maybe use an option here
             maxpar_dl: Semaphore::new(Semaphore::MAX_PERMITS).into(),
             maxpar_req: Semaphore::new(Semaphore::MAX_PERMITS).into(),
         }
@@ -111,6 +112,7 @@ where
     {
         let write_offset = target.seek(std::io::SeekFrom::End(0)).await?;
         pg.set_position(write_offset);
+        //fixme: write_offset 0 seems like a bug, if not then explain why it is that way, also write a test
         let mut body = get_header(limits, client, pg, url, 0).await?;
         pg.set_length(body.content_length().map(|c| c + write_offset).unwrap_or(0));
 

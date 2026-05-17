@@ -39,6 +39,7 @@ pub trait CacheState {
 
     It is possible to set a max parallelism level.
     todo: streaming, currently the whole thing is generated at once
+    todo: streaming, send file to other requesters, as it is generated. async should be useful for this, probbaly need a custom type.
 */
 pub struct FileCache<State>
 where

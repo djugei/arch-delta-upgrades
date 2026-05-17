@@ -47,6 +47,7 @@ pub(crate) fn find_deltaupgrade_candidates(
     blacklist: &[Str],
     _fuz: bool,
 ) -> Result<Vec<DeltaUpgradeCandidate>, anyhow::Error> {
+    //FIXME: this does not find all upgrades, seemingly. run pacman and this in parallel and output diffs
     let upgrades = libalpm_rs::upgrade_urls(&global.pacman_config, &["core", "extra", "multilib"]);
 
     let mut direct_downloads = Vec::new();

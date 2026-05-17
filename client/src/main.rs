@@ -569,6 +569,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
     // This is also the only time the compression parameters are altered.
     // That's pretty hefty.
     let filename = new.file_name().unwrap().to_string_lossy();
+    //todo: maybe try passing through the package instead having to parse here
     let pkg = Package::try_from(filename.as_ref()).unwrap();
     let mut command = Command::new("zstd");
     if [
