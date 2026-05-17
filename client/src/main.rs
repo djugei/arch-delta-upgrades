@@ -158,7 +158,6 @@ fn main() {
             blacklist,
             no_fuz,
         } => {
-            renice();
             full_upgrade(global, server, pacman_sync, blacklist, no_fuz);
         }
         Commands::Download {
@@ -166,7 +165,6 @@ fn main() {
             delta_cache,
             no_fuz,
         } => {
-            renice();
             if let Some(p) = delta_cache {
                 global.pacman_config.cache_dir = p;
             }
@@ -178,7 +176,6 @@ fn main() {
             std::mem::drop(db)
         }
         Commands::Sync { server, target_dir } => {
-            renice();
             if let Some(t) = target_dir {
                 global.db_sync_path = t;
             }
@@ -187,38 +184,6 @@ fn main() {
             std::mem::drop(db)
         }
         Commands::Stats { number: count } => util::calc_stats(count.unwrap_or(5)).unwrap(),
-    }
-}
-
-/// lower the io and cpu priority
-fn renice() {
-    //SAFETY: this purely calls some libc functions, and does so correctly.
-    // No memory stuff is done.
-    unsafe {
-        // getpid always succeeds
-        let pid = libc::getpid() as u32;
-        // Not checking for error, only possible errors are misuse.
-        let curprio = libc::getpriority(libc::PRIO_PROCESS, pid);
-        trace!("current prio/nice is {curprio}");
-        if curprio > -10 {
-            let e = libc::setpriority(libc::PRIO_PROCESS, pid, -10);
-            if e == -1 {
-                let err = std::io::Error::last_os_error();
-                debug!("could not set/lower cpu priority: {}", err);
-            } else {
-                trace!("set prio/nice to -10");
-            }
-        }
-
-        const IOPRIO_WHO_PROCESS: i32 = 1;
-        const IOPRIO_CLASS_IDLE: i32 = 3;
-        let e = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, pid, IOPRIO_CLASS_IDLE);
-        if e == -1 {
-            let err = std::io::Error::last_os_error();
-            debug!("could not set/lower io priority: {}", err);
-        } else {
-            trace!("set ioprio to idle");
-        }
     }
 }
 

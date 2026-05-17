@@ -6,8 +6,31 @@ ConditionCPUPressure = 10%/5min
 
 [Service]
 Type = oneshot
-ExecStart = /usr/bin/deltaclient sync http://bogen.moeh.re/
-# as long as sync can't run without root we dl straight to pacman cache
-ExecStart = /usr/bin/deltaclient -v download --no-fuz http://bogen.moeh.re/ /var/cache/pacman/pkg/
 RemainAfterExit = no
 
+User=deltaclient
+Group=deltaclient
+DynamicUser=yes
+
+CacheDirectory=deltaclient
+StateDirectory=deltaclient
+
+# maybe lock/unlock the pacman cache manually?
+ExecStart = /usr/bin/deltaclient sync http://bogen.moeh.re/ ${STATE_DIRECTORY}
+# we can use ! to run single commands as privileged user
+# better use find here
+ExecStart = !cp ${STATE_DIRECTORY}/core.db /var/lib/pacman/sync/core.db
+ExecStart = !cp ${STATE_DIRECTORY}/extra.db /var/lib/pacman/sync/extra.db
+ExecStart = !cp ${STATE_DIRECTORY}/multilib.db /var/lib/pacman/sync/multilib.db
+ExecStart = /usr/bin/deltaclient -v download --no-fuz http://bogen.moeh.re/ ${CACHE_DIRECTORY}/
+ExecStart = !fd '.*\\.pkg\\.tar\\.zst$' ${CACHE_DIRECTORY} -x mv {} /var/cache/pacman/pkg/
+
+Nice=19
+IOSchedulingClass=idle
+
+ProtectHome=tmpfs
+ProtectSystem=strict
+ReadWritePaths=/var/cache/pacman/pkg/ /var/lib/pacman/sync/
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
