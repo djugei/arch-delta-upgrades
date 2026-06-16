@@ -165,10 +165,15 @@ fn main() {
             delta_cache,
             no_fuz,
         } => {
-            if let Some(p) = delta_cache {
+            let db;
+            if let Some(p) = delta_cache
+                && p != global.pacman_config.cache_dir
+            {
+                db = None;
                 global.pacman_config.cache_dir = p;
+            } else {
+                db = Some(libalpm_rs::db::DBLock::new().expect("cache locked"));
             }
-            let db = libalpm_rs::db::DBLock::new().expect("cache locked");
             std::fs::create_dir_all(&global.pacman_config.cache_dir).unwrap();
             mkruntime()
                 .block_on(do_upgrade(global, server, vec![], !no_fuz))
@@ -176,10 +181,15 @@ fn main() {
             std::mem::drop(db)
         }
         Commands::Sync { server, target_dir } => {
-            if let Some(t) = target_dir {
+            let db;
+            if let Some(t) = target_dir
+                && t != global.db_sync_path
+            {
+                db = None;
                 global.db_sync_path = t;
+            } else {
+                db = Some(libalpm_rs::db::DBLock::new().expect("cache locked"));
             }
-            let db = libalpm_rs::db::DBLock::new().expect("cache locked");
             mkruntime().block_on(sync(global, server)).unwrap();
             std::mem::drop(db)
         }
@@ -314,10 +324,10 @@ async fn do_upgrade(
             Ok((d, n, c)) => {
                 deltasize += d;
                 newsize += n;
-                if let Some(c) = c {
-                    if let Some(comptime) = &mut comptime {
-                        *comptime += c
-                    }
+                if let Some(c) = c
+                    && let Some(comptime) = &mut comptime
+                {
+                    *comptime += c
                 }
             }
         }
