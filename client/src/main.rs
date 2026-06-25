@@ -57,16 +57,13 @@ enum Commands {
     ///
     /// If delta_cache is somewhere you can write, no sudo is needed.
     ///
+    /// # Rootless operation
     /// ```bash
-    /// // todo make this rootless
-    /// $ sudo deltaclient sync http://bogen.moeh.re/
-    /// ## or
-    /// $ sudo pacman -Sy
+    /// $ deltaclient sync http://bogen.moeh.re/ /path/to/cache/
+    /// $ sudo cp /path/to/cache/*.db /var/lib/pacman/sync/
     ///
-    /// $ deltaclient download http://bogen.moeh.re/ path
-    /// $ sudo cp path/*.pkg path/*.sig /var/cache/pacman/pkg/
-    /// ## or
-    /// $ sudo deltaclient download http://bogen.moeh.re/ /var/cache/pacman/pkg/
+    /// $ deltaclient download http://bogen.moeh.re/ /path/to/cache/ --no-mv
+    /// $ sudo cp /path/to/cache/*.pkg /var/cache/pacman/pkg/
     ///
     /// $ sudo pacman -Su
     /// ```
@@ -81,6 +78,10 @@ enum Commands {
         /// This might find renames like -qt5 to -qt6
         #[arg(long)]
         no_fuz: bool,
+        /// don't move patched packages to the pacman dir,
+        /// use if you don't have write permissions for it.
+        #[arg(long)]
+        no_mv: bool,
     },
     /// Calculate and display some statistics about effectiveness of the delta-encoding
     Stats {
@@ -164,21 +165,21 @@ fn main() {
             server,
             delta_cache,
             no_fuz,
+            no_mv,
         } => {
-            let db;
-            if let Some(p) = delta_cache
-                && p != global.pacman_config.cache_dir
-            {
-                db = None;
-                global.pacman_config.cache_dir = p;
-            } else {
-                db = Some(libalpm_rs::db::DBLock::new().expect("cache locked"));
-            }
-            std::fs::create_dir_all(&global.pacman_config.cache_dir).unwrap();
+            if let Some(d) = delta_cache {
+                global.delta_cache_dir = d.into()
+            };
+            std::fs::create_dir_all(&global.delta_cache_dir).unwrap();
             mkruntime()
-                .block_on(do_upgrade(global, server, vec![], !no_fuz))
+                .block_on(do_upgrade(&global, server, vec![], !no_fuz))
                 .unwrap();
-            std::mem::drop(db)
+
+            if !no_mv {
+                let lock = libalpm_rs::db::DBLock::new();
+                move_packages_to_pacman_cache(&global).unwrap();
+                std::mem::drop(lock);
+            }
         }
         Commands::Sync { server, target_dir } => {
             let db;
@@ -228,14 +229,16 @@ fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: 
         info!("syncing databases");
         runtime.block_on(sync(global.clone(), server.clone())).unwrap();
     }
+    let global_ = &global;
     let (deltasize, newsize, comptime) =
-        match runtime.block_on(async move { do_upgrade(global, server, blacklist, !no_fuz).await }) {
+        match runtime.block_on(async move { do_upgrade(global_, server, blacklist, !no_fuz).await }) {
             Ok((d, n, c)) => (d, n, c),
             Err(e) => {
                 error!("{e}");
                 panic!("{e}")
             }
         };
+    move_packages_to_pacman_cache(&global).unwrap();
     std::mem::drop(db);
     info!("running pacman -Su to install updates");
     let exit = Command::new("pacman")
@@ -271,7 +274,7 @@ fn mkruntime() -> tokio::runtime::Runtime {
 }
 
 async fn do_upgrade(
-    global: GlobalState,
+    global: &GlobalState,
     server: Url,
     blacklist: Vec<Str>,
     fuz: bool,
@@ -345,6 +348,7 @@ pub(crate) struct GlobalState {
     maxpar_cpu: Arc<Semaphore>,
     client: Client,
     pacman_config: libalpm_rs::config::PacmanConfig,
+    delta_cache_dir: Box<Path>,
     /// by default this is /var/lib/pacman/sync
     /// but can be altered through pacman.conf or command line parameters
     db_sync_path: Box<Path>,
@@ -374,6 +378,7 @@ impl GlobalState {
         let pacman_config = libalpm_rs::config::extract_relevant_config();
         let db_sync_path = pacman_config.db_path.join("sync").join("").into();
         debug!("db sync path is {:?}", db_sync_path);
+        let delta_cache_dir = Path::new("/var/cache/deltaclient/").into();
 
         Self {
             multi,
@@ -384,6 +389,7 @@ impl GlobalState {
             client,
             pacman_config,
             db_sync_path,
+            delta_cache_dir,
         }
     }
 
@@ -406,14 +412,14 @@ async fn get_delta(
     server: Url,
 ) -> Result<(u64, u64, Option<Duration>), anyhow::Error> {
     global.total_pg.inc_length(dec_size);
-    let mut file_name = global.pacman_config.cache_dir.clone();
-    file_name.push(newpkg.to_string());
+    let file_name = global.delta_cache_dir.join(newpkg.to_string());
+
     let delta = common::Delta::try_from((oldpkg.clone(), newpkg.clone()))?;
-    let deltafile_part_name = file_name.with_file_name(format!("{delta}.delta.part"));
-    let deltafile_name = file_name.with_file_name(format!("{delta}.delta"));
+    let deltafile_part_name = global.delta_cache_dir.join(format!("{delta}.delta.part"));
+    let deltafile_name = global.delta_cache_dir.join(format!("{delta}.delta"));
     let mut deltafile = tokio::fs::File::options()
         .write(true)
-        .truncate(false)
+        .truncate(false) //TODO: continue download instead
         .create(true)
         .open(&deltafile_part_name)
         .await
@@ -607,6 +613,27 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
     info!("patched {}", new.file_name().unwrap().to_string_lossy());
 
     Ok(comptime)
+}
+
+/// find packages (*.pkg.tar.zst) in the delta_cache and move it to the pacman cache
+fn move_packages_to_pacman_cache(global: &GlobalState) -> std::io::Result<()> {
+    for line in std::fs::read_dir(&global.delta_cache_dir)? {
+        let line = line?;
+        if !line.file_type()?.is_file() {
+            continue;
+        }
+        let path = line.path();
+        if let Some(e) = path.extension()
+            && e.to_string_lossy().ends_with(".pkg.tar.zst")
+        {
+            let from = &path;
+            let to = global.pacman_config.cache_dir.join(path.file_name().unwrap());
+            debug!("moving {from:?} to {to:?}");
+            std::fs::rename(from, to)?
+        }
+    }
+
+    Ok(())
 }
 
 #[test]

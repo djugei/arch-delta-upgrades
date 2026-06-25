@@ -228,6 +228,8 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
     let mut pkgs: HashMap<(Str, Str, Str), u64> = HashMap::new();
     let mut pairs: HashMap<Str, (u64, u64, u64)> = HashMap::new();
     let config = libalpm_rs::config::extract_relevant_config();
+    //FIXME: deltas will be deleted after successfull patch application now,
+    // think of something new for stats calculation. for now still useful for server side.
     for line in std::fs::read_dir(config.cache_dir)? {
         let line = line?;
         if !line.file_type()?.is_file() {

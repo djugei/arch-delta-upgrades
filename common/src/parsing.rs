@@ -3,6 +3,7 @@ use thiserror::Error;
 type Str = Box<str>;
 
 #[derive(Debug, Eq, PartialOrd, Ord, Clone)]
+//todo: impl fmt
 pub struct Package {
     name: Str,
     version: Str,

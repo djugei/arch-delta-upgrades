@@ -22,7 +22,7 @@ ExecStart = /usr/bin/deltaclient sync http://bogen.moeh.re/ ${STATE_DIRECTORY}
 ExecStart = !cp ${STATE_DIRECTORY}/core.db /var/lib/pacman/sync/core.db
 ExecStart = !cp ${STATE_DIRECTORY}/extra.db /var/lib/pacman/sync/extra.db
 ExecStart = !cp ${STATE_DIRECTORY}/multilib.db /var/lib/pacman/sync/multilib.db
-ExecStart = /usr/bin/deltaclient -v download --no-fuz http://bogen.moeh.re/ ${CACHE_DIRECTORY}/
+ExecStart = /usr/bin/deltaclient -v download --no-fuz --no-mv http://bogen.moeh.re/ ${CACHE_DIRECTORY}/
 ExecStart = !fd '.*\\.pkg\\.tar\\.zst$' ${CACHE_DIRECTORY} -x mv {} /var/cache/pacman/pkg/
 
 Nice=19
