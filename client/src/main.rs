@@ -239,6 +239,12 @@ fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: 
             }
         };
     move_packages_to_pacman_cache(&global).unwrap();
+    global.multi.remove(&global.total_pg);
+    global.total_pg.finish_and_clear();
+    std::mem::drop(global.total_pg);
+    global.multi.clear().unwrap();
+    std::mem::drop(global.multi);
+
     std::mem::drop(db);
     info!("running pacman -Su to install updates");
     let exit = Command::new("pacman")
@@ -610,6 +616,7 @@ fn apply_patch(orig: &[u8], patch: &Path, new: &Path, pb: ProgressBar) -> anyhow
         handle.join().unwrap()?;
     }
     orig.progress.finish_and_clear();
+    // wrong output ((..)..patch) (double .)
     info!("patched {}", new.file_name().unwrap().to_string_lossy());
 
     Ok(comptime)
