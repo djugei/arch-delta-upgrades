@@ -630,9 +630,7 @@ fn move_packages_to_pacman_cache(global: &GlobalState) -> std::io::Result<()> {
             continue;
         }
         let path = line.path();
-        if let Some(e) = path.extension()
-            && e.to_string_lossy().ends_with(".pkg.tar.zst")
-        {
+        if path.to_string_lossy().ends_with(".pkg.tar.zst") {
             let from = &path;
             let to = global.pacman_config.cache_dir.join(path.file_name().unwrap());
             debug!("moving {from:?} to {to:?}");

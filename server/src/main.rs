@@ -232,6 +232,8 @@ async fn dbdelta(
     let mut h = HeaderMap::new();
     h.typed_insert(headers::ContentType::from_str("application/octet-stream").unwrap());
     info!(name = name, old = old, "dbdelta requested for",);
+    //FIXME: catch/handle unexpected end of file by deleting said file and retrying
+    //       (this happens when disk runs full)
     match db.get_delta_to(old).await {
         Ok((stamp, patch)) => {
             h.insert(
