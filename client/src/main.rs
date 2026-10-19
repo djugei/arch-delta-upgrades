@@ -47,7 +47,7 @@ enum Commands {
         no_fuz: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
-    //TODO: target directory/rootless mode
+    //TODO: separate sync download/assemble path from pacman syncdb directory, provide --no-copy option
     Sync {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
@@ -159,6 +159,8 @@ fn main() {
             blacklist,
             no_fuz,
         } => {
+            std::fs::create_dir_all(&global.delta_cache_dir)
+                .expect("could not create delta cache directory, permission issue?");
             full_upgrade(global, server, pacman_sync, blacklist, no_fuz);
         }
         Commands::Download {
@@ -170,7 +172,8 @@ fn main() {
             if let Some(d) = delta_cache {
                 global.delta_cache_dir = d.into()
             };
-            std::fs::create_dir_all(&global.delta_cache_dir).unwrap();
+            std::fs::create_dir_all(&global.delta_cache_dir)
+                .expect("could not create delta cache directory, permission issue?");
             mkruntime()
                 .block_on(do_upgrade(&global, server, vec![], !no_fuz))
                 .unwrap();
