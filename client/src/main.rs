@@ -41,10 +41,6 @@ enum Commands {
         /// if unset/by default uses delta-enabled sync.
         #[arg(long)]
         pacman_sync: bool,
-        /// Disable fuzzy search if an exact package can not be found.
-        /// This might find renames like -qt5 to -qt6
-        #[arg(long)]
-        no_fuz: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
     //TODO: separate sync download/assemble path from pacman syncdb directory, provide --no-copy option
@@ -74,10 +70,6 @@ enum Commands {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
         delta_cache: Option<PathBuf>,
-        /// Disable fuzzy search if an exact package can not be found.
-        /// This might find renames like -qt5 to -qt6
-        #[arg(long)]
-        no_fuz: bool,
         /// don't move patched packages to the pacman dir,
         /// use if you don't have write permissions for it.
         #[arg(long)]
@@ -157,16 +149,14 @@ fn main() {
             server,
             pacman_sync,
             blacklist,
-            no_fuz,
         } => {
             std::fs::create_dir_all(&global.delta_cache_dir)
                 .expect("could not create delta cache directory, permission issue?");
-            full_upgrade(global, server, pacman_sync, blacklist, no_fuz);
+            full_upgrade(global, server, pacman_sync, blacklist);
         }
         Commands::Download {
             server,
             delta_cache,
-            no_fuz,
             no_mv,
         } => {
             if let Some(d) = delta_cache {
@@ -174,9 +164,7 @@ fn main() {
             };
             std::fs::create_dir_all(&global.delta_cache_dir)
                 .expect("could not create delta cache directory, permission issue?");
-            mkruntime()
-                .block_on(do_upgrade(&global, server, vec![], !no_fuz))
-                .unwrap();
+            mkruntime().block_on(do_upgrade(&global, server, vec![])).unwrap();
 
             if !no_mv {
                 let lock = libalpm_rs::db::DBLock::new();
@@ -212,7 +200,7 @@ async fn sync(global: GlobalState, server: Url) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: Vec<Box<str>>, no_fuz: bool) {
+fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: Vec<Box<str>>) {
     let runtime = mkruntime();
     let db;
     if pacman_sync {
@@ -234,7 +222,7 @@ fn full_upgrade(global: GlobalState, server: Url, pacman_sync: bool, blacklist: 
     }
     let global_ = &global;
     let (deltasize, newsize, comptime) =
-        match runtime.block_on(async move { do_upgrade(global_, server, blacklist, !no_fuz).await }) {
+        match runtime.block_on(async move { do_upgrade(global_, server, blacklist).await }) {
             Ok((d, n, c)) => (d, n, c),
             Err(e) => {
                 error!("{e}");
@@ -286,9 +274,8 @@ async fn do_upgrade(
     global: &GlobalState,
     server: Url,
     blacklist: Vec<Str>,
-    fuz: bool,
 ) -> anyhow::Result<(u64, u64, Option<Duration>)> {
-    let upgrade_candidates = util::find_deltaupgrade_candidates(&global, &blacklist, fuz)?;
+    let upgrade_candidates = util::find_deltaupgrade_candidates(&global, &blacklist)?;
 
     info!("downloading {} delta updates", upgrade_candidates.len());
 

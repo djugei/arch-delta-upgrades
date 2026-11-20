@@ -45,13 +45,11 @@ type DeltaUpgradeCandidate = (Url, Delta, Mmap, u64);
 pub(crate) fn find_deltaupgrade_candidates(
     global: &crate::GlobalState,
     blacklist: &[Str],
-    _fuz: bool,
 ) -> Result<Vec<DeltaUpgradeCandidate>, anyhow::Error> {
     //FIXME: this does not find all upgrades, seemingly. run pacman and this in parallel and output diffs
     let upgrades = libalpm_rs::upgrade_urls(&global.pacman_config, &["core", "extra", "multilib"]);
-
-    let mut direct_downloads = Vec::new();
     let mut deltas = Vec::new();
+
     for (url, old, new) in upgrades {
         assert_eq!(old.i, new.i);
         use libalpm_rs::db::QuickResolve;
@@ -103,9 +101,8 @@ pub(crate) fn find_deltaupgrade_candidates(
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
+                    // pacman will take care of it
                     debug!("direct download {old_name}-{old_version}");
-                    //TODO: re-add fuzzy logic
-                    direct_downloads.push(Url::parse(&url)?);
                 } else {
                     Err(e)?;
                 }
