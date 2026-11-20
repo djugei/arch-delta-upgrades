@@ -5,6 +5,9 @@ edition = "2021"
 description = "Header parsers, specifically for ContentDisposition copied from ruma-common#9f87ace280fe"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror = "*"
 percent-encoding = "*"
