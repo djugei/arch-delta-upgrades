@@ -6,7 +6,7 @@ use common::{Delta, Package};
 use http::StatusCode;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
-use log::{debug, info, trace};
+use log::{debug, error, info, trace};
 use memmap2::Mmap;
 use reqwest::Url;
 use ruma_headers::ContentDisposition;
@@ -310,6 +310,13 @@ pub(crate) fn calc_stats(count: usize) -> std::io::Result<()> {
         if len < dlen {
             debug!("big delta in {}: {}:{}", name, ByteSize::b(*len), ByteSize::b(*dlen))
         }
+    }
+
+    if count == 0 {
+        error!(
+            "you seem to have no delta packages in cache, this is probably because they now get deleted after successfull application.\nstats is only used on the server side now"
+        );
+        return Ok(());
     }
 
     let iwidth = count.ilog10() as usize + 1;

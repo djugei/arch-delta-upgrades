@@ -43,7 +43,6 @@ enum Commands {
         pacman_sync: bool,
     },
     /// Upgrade the databases using deltas, ~= pacman -Sy
-    //TODO: separate sync download/assemble path from pacman syncdb directory, provide --no-copy option
     Sync {
         #[arg(default_value = "http://bogen.moeh.re/")]
         server: Url,
@@ -76,18 +75,21 @@ enum Commands {
         no_mv: bool,
     },
     /// Calculate and display some statistics about effectiveness of the delta-encoding
+    #[clap(hide = true)]
     Stats {
         /// Number of best/worst entries to display
         number: Option<usize>,
     },
-    #[cfg(feature = "diff")]
     /// Debug: generate a delta
+    #[cfg(feature = "diff")]
+    #[clap(hide = true)]
     Delta {
         orig: PathBuf,
         new: PathBuf,
         patch: PathBuf,
     },
     /// Debug: manually apply a patch
+    #[clap(hide = true)]
     Patch {
         orig: PathBuf,
         patch: PathBuf,
