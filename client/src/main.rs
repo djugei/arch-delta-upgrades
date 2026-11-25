@@ -169,7 +169,7 @@ fn main() {
             mkruntime().block_on(do_upgrade(&global, server, vec![])).unwrap();
 
             if !no_mv {
-                let lock = libalpm_rs::db::DBLock::new();
+                let lock = libalpm_rs::db::DBLock::new().expect("cache locked");
                 move_packages_to_pacman_cache(&global).unwrap();
                 std::mem::drop(lock);
             }
