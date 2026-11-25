@@ -417,7 +417,7 @@ async fn get_delta(
     let deltafile_name = global.delta_cache_dir.join(format!("{delta}.delta"));
     let mut deltafile = tokio::fs::File::options()
         .write(true)
-        .truncate(false) //TODO: continue download instead
+        .truncate(false)
         .create(true)
         .open(&deltafile_part_name)
         .await

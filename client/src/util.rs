@@ -23,6 +23,8 @@ pub(crate) fn progress_style() -> ProgressStyle {
         .progress_chars("█▇▆▅▄▃▂▁  ")
 }
 
+/// Downloads a delta, displaying a progress bar.
+/// if a partial file exists, continues the download if the server supports ranges.
 pub(crate) async fn do_delta_download<W: AsyncRead + AsyncWrite + AsyncSeek>(
     global: crate::GlobalState,
     pkg: &Package,
